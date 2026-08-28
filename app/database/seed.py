@@ -36,25 +36,27 @@ def clear_existing_data(conn):
 # =========================================================
 
 def seed_donors(conn):
-    """
-    8 simulated food donors representing common donor types.
-    """
-
     donors = [
-        ("GreenMart #12", "Downtown"),
-        ("Fresh Foods Market", "Northside"),
-        ("Community Bakery", "Westside"),
-        ("Harvest Market", "Eastside"),
-        ("Local Grill", "Southside"),
-        ("Riverfront Grocery", "Downtown"),
-        ("Sunrise Cafe", "Northside"),
-        ("Metro Wholesale Foods", "Eastside"),
+        # name, location label, latitude, longitude
+        ("GreenMart #12", "Central District", 36.1627, -86.7816),
+        ("Fresh Foods Market", "North District", 36.1880, -86.7900),
+        ("Community Bakery", "West District", 36.1580, -86.8200),
+        ("Harvest Market", "East District", 36.1670, -86.7450),
+        ("Local Grill", "South District", 36.1300, -86.7800),
+        ("Riverfront Grocery", "Central East", 36.1650, -86.7650),
+        ("Sunrise Cafe", "Northwest", 36.1850, -86.8100),
+        ("Metro Wholesale Foods", "Southeast", 36.1400, -86.7500),
     ]
 
     conn.executemany(
         """
-        INSERT INTO donors (name, location)
-        VALUES (?, ?)
+        INSERT INTO donors (
+            name,
+            location,
+            latitude,
+            longitude
+        )
+        VALUES (?, ?, ?, ?)
         """,
         donors,
     )
@@ -65,42 +67,55 @@ def seed_donors(conn):
 # =========================================================
 
 def seed_pantries(conn):
-    """
-    Pantries intentionally have different capacities.
-
-    These differences allow us to test:
-    - small vs large pantry capacity
-    - nearly full pantries
-    - splitting donations
-    - high-need vs low-need allocation
-    """
-
     pantries = [
-        # name, location, max_capacity, available_capacity, status
+        # name, location, lat, lon,
+        # max capacity, available capacity, status
 
-        # P1: Good general-purpose pantry
-        ("Hope Community Pantry", "Downtown", 180, 180, "available"),
+        ("Hope Community Pantry",
+         "Central District",
+         36.1550, -86.7750,
+         180, 180, "available"),
 
-        # P2: Smaller pantry
-        ("River Valley Food Center", "Northside", 100, 80, "available"),
+        ("River Valley Food Center",
+         "North District",
+         36.1950, -86.7850,
+         100, 80, "available"),
 
-        # P3: Large pantry, but farther from some donors
-        ("Community Care Pantry", "Westside", 250, 250, "available"),
+        ("Community Care Pantry",
+         "West District",
+         36.1600, -86.8300,
+         250, 250, "available"),
 
-        # P4: Medium-large food bank
-        ("Helping Hands Food Bank", "Eastside", 200, 160, "available"),
+        ("Helping Hands Food Bank",
+         "East District",
+         36.1700, -86.7350,
+         200, 160, "available"),
 
-        # P5: EDGE CASE - almost full, only 40 lbs currently available
-        ("Neighborhood Relief Center", "Southside", 120, 40, "available"),
+        # Edge case:
+        # extremely high need later,
+        # but only 40 lbs available capacity
+        ("Neighborhood Relief Center",
+         "South District",
+         36.1250, -86.7900,
+         120, 40, "available"),
 
-        # P6: Large available capacity but lower produce need
-        ("Northside Family Pantry", "Northside", 220, 200, "available"),
+        # Large capacity but lower produce need
+        ("Northside Family Pantry",
+         "North Central",
+         36.2050, -86.7700,
+         220, 200, "available"),
 
-        # P7: Specialized pantry
-        ("St. Mary's Community Shelf", "Downtown", 120, 100, "available"),
+        # Specialized bakery/shelf-stable pantry
+        ("St. Mary's Community Shelf",
+         "Central West",
+         36.1500, -86.8000,
+         120, 100, "available"),
 
-        # P8: High-need pantry with moderate remaining capacity
-        ("Southside Outreach Center", "Southside", 180, 150, "available"),
+        # High-need pantry farther south
+        ("Southside Outreach Center",
+         "South East",
+         36.1150, -86.7550,
+         180, 150, "available"),
     ]
 
     conn.executemany(
@@ -108,15 +123,16 @@ def seed_pantries(conn):
         INSERT INTO pantries (
             name,
             location,
+            latitude,
+            longitude,
             max_capacity_lbs,
             available_capacity_lbs,
             status
         )
-        VALUES (?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         pantries,
     )
-
 
 # =========================================================
 # PANTRY NEEDS
@@ -229,54 +245,78 @@ def seed_pantry_needs(conn):
 # =========================================================
 
 def seed_drivers(conn):
-    """
-    12 drivers with intentionally different:
-    - vehicle capacities
-    - availability windows
-    - locations
-    - statuses
-
-    These allow us to create deadline conflicts,
-    exact-capacity cases, cancellations, and shortages.
-    """
-
     drivers = [
+        # name, location, lat, lon,
+        # capacity, from, until, status
 
-        # D1 - reliable mid-size driver
-        ("Sarah", "Downtown", 150, "10:00", "14:00", "available"),
+        ("Sarah",
+         "Central District",
+         36.1600, -86.7850,
+         150, "10:00", "14:00", "available"),
 
-        # D2
-        ("Mike", "Northside", 100, "12:00", "16:00", "available"),
+        ("Mike",
+         "North District",
+         36.1900, -86.7950,
+         100, "12:00", "16:00", "available"),
 
-        # D3
-        ("Lisa", "Westside", 120, "10:00", "17:00", "available"),
+        ("Lisa",
+         "West District",
+         36.1550, -86.8150,
+         120, "10:00", "17:00", "available"),
 
-        # D4 - high-capacity driver but ends early
-        ("James", "Eastside", 200, "09:00", "13:00", "available"),
+        # Large vehicle, but finishes early
+        ("James",
+         "East District",
+         36.1750, -86.7400,
+         200, "09:00", "13:00", "available"),
 
-        # D5 - small vehicle
-        ("Priya", "Southside", 80, "11:00", "15:00", "available"),
+        # Small vehicle
+        ("Priya",
+         "South District",
+         36.1300, -86.7850,
+         80, "11:00", "15:00", "available"),
 
-        # D6 - starts late
-        ("Daniel", "Downtown", 100, "13:00", "18:00", "available"),
+        # Starts later
+        ("Daniel",
+         "Central East",
+         36.1650, -86.7700,
+         100, "13:00", "18:00", "available"),
 
-        # D7 - useful for tight morning deadlines
-        ("Emily", "Northside", 140, "09:00", "12:30", "available"),
+        # Useful for morning pickups
+        ("Emily",
+         "Northwest",
+         36.1850, -86.8050,
+         140, "09:00", "12:30", "available"),
 
-        # D8 - EDGE CASE: explicitly unavailable
-        ("John", "Westside", 100, "10:00", "14:00", "unavailable"),
+        # Edge case: unavailable driver
+        ("John",
+         "West District",
+         36.1600, -86.8250,
+         100, "10:00", "14:00", "unavailable"),
 
-        # D9 - very small vehicle
-        ("Aisha", "Downtown", 60, "10:00", "14:00", "available"),
+        # Very small vehicle
+        ("Aisha",
+         "Central District",
+         36.1500, -86.7700,
+         60, "10:00", "14:00", "available"),
 
-        # D10 - large-capacity driver
-        ("Carlos", "Eastside", 180, "11:00", "16:00", "available"),
+        # Large-capacity driver
+        ("Carlos",
+         "East District",
+         36.1800, -86.7500,
+         180, "11:00", "16:00", "available"),
 
-        # D11 - available only early
-        ("Noah", "Northside", 75, "08:00", "11:30", "available"),
+        # Available only early
+        ("Noah",
+         "North District",
+         36.2000, -86.8000,
+         75, "08:00", "11:30", "available"),
 
-        # D12 - starts very late
-        ("Maya", "Southside", 120, "14:00", "18:00", "available"),
+        # Available only later
+        ("Maya",
+         "South East",
+         36.1200, -86.7600,
+         120, "14:00", "18:00", "available"),
     ]
 
     conn.executemany(
@@ -284,12 +324,14 @@ def seed_drivers(conn):
         INSERT INTO drivers (
             name,
             location,
+            latitude,
+            longitude,
             capacity_lbs,
             available_from,
             available_until,
             status
         )
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         drivers,
     )

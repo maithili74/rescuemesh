@@ -32,7 +32,9 @@ def create_tables():
         CREATE TABLE IF NOT EXISTS donors (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
-            location TEXT NOT NULL
+            location TEXT NOT NULL,
+            latitude REAL NOT NULL,
+            longitude REAL NOT NULL
         )
         """
     )
@@ -46,6 +48,8 @@ def create_tables():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             location TEXT NOT NULL,
+            latitude REAL NOT NULL,
+            longitude REAL NOT NULL,
             max_capacity_lbs REAL NOT NULL,
             available_capacity_lbs REAL NOT NULL,
             status TEXT NOT NULL DEFAULT 'available'
@@ -77,6 +81,8 @@ def create_tables():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             location TEXT NOT NULL,
+            latitude REAL NOT NULL,
+            longitude REAL NOT NULL,
             capacity_lbs REAL NOT NULL,
             available_from TEXT NOT NULL,
             available_until TEXT NOT NULL,
@@ -118,11 +124,16 @@ def get_donation_by_id(donation_id):
             donations.available_at,
             donations.pickup_deadline,
             donations.status,
+
             donors.name AS donor_name,
-            donors.location AS donor_location
+            donors.location AS donor_location,
+            donors.latitude AS donor_latitude,
+            donors.longitude AS donor_longitude
+
         FROM donations
         JOIN donors
             ON donations.donor_id = donors.id
+
         WHERE donations.id = ?
         """,
         (donation_id,),
@@ -149,6 +160,8 @@ def get_compatible_pantries(donation_id):
             p.id,
             p.name,
             p.location,
+            p.latitude,
+            p.longitude,
             p.available_capacity_lbs,
             pn.need_score,
             pn.food_type
@@ -193,6 +206,8 @@ def get_eligible_drivers(donation_id):
         dr.id,
         dr.name,
         dr.location,
+        dr.latitude,
+        dr.longitude,
         dr.capacity_lbs,
         dr.available_from,
         dr.available_until,

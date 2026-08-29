@@ -67,6 +67,76 @@ def get_route(origin_lat, origin_lon, destination_lat, destination_lon):
         "duration_minutes": round(duration_minutes, 2),
     }
     
+    
+def get_route_matrix(locations):
+    """
+    Get real road distances and travel times between
+    multiple coordinates using openrouteservice Matrix API.
+
+    locations format:
+    [
+        (latitude, longitude),
+        (latitude, longitude),
+        ...
+    ]
+    """
+
+    if not ORS_API_KEY:
+        raise RuntimeError(
+            "ORS_API_KEY is missing. Add it to your .env file."
+        )
+
+    url = f"{ORS_BASE_URL}/v2/matrix/driving-car"
+
+    headers = {
+        "Authorization": ORS_API_KEY,
+        "Content-Type": "application/json",
+    }
+
+    # ORS expects longitude first, then latitude.
+    coordinates = [
+        [longitude, latitude]
+        for latitude, longitude in locations
+    ]
+
+    payload = {
+        "locations": coordinates,
+        "metrics": ["distance", "duration"],
+        "units": "mi",
+    }
+
+    response = requests.post(
+        url,
+        json=payload,
+        headers=headers,
+        timeout=30,
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    distances = data["distances"]
+    durations_seconds = data["durations"]
+
+    durations_minutes = []
+
+    for row in durations_seconds:
+        converted_row = []
+
+        for value in row:
+            if value is None:
+                converted_row.append(None)
+            else:
+                converted_row.append(value / 60)
+
+        durations_minutes.append(converted_row)
+
+    return {
+        "distances_miles": distances,
+        "durations_minutes": durations_minutes,
+    }
+    
 if __name__ == "__main__":
     route = get_route(
         origin_lat=35.3859,

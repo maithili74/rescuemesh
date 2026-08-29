@@ -1,0 +1,5 @@
+pulp
+python-dotenv
+pytest
+requests
+ortools

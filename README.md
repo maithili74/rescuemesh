@@ -2,20 +2,19 @@
 
 
 
-Database + seed data
-Real ORS routing
-PuLP food allocation
-OR-Tools multi-stop routing
-Edge-case tests
-Optimizer committed
+1. Database + seed data
+2. Real ORS routing
+3. PuLP food allocation
+4. OR-Tools multi-stop routing
+5. Edge-case tests
+6. Optimizer committed
+7. Operations/state tables - done
+8. Execute/save an optimized plan - done 
 
-
-1. Operations/state tables - done
-2. Execute/save an optimized plan - done 
-3. Event system
-4. Driver cancellation + automatic re-plan
-5. Human escalation
-6. Strands agent + tools
-7. Streamlit dashboard
-8. Benchmark
-9. AWS Bedrock/AgentCore if credits arrive
+9. Event system
+10. Driver cancellation + automatic re-plan
+11. Human escalation
+12. Strands agent + tools
+13. Streamlit dashboard
+14. Benchmark
+15. AWS Bedrock/AgentCore if credits arrive

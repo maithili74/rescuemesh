@@ -980,19 +980,26 @@ def start_operation(
 def _release_resources_for_replan(
     conn,
     operation_id,
-    cancelled_driver_id,
+    unavailable_driver_id=None,
 ):
     """
-    Release all resources reserved by an operation.
+    Release resources belonging to an abandoned operation.
 
-    Used when a driver cancellation forces the whole
-    pre-delivery operation to be replanned.
+    Pantry reservations are restored.
 
-    The cancelled driver stays unavailable.
+    Normally all drivers become available again.
 
-    Other drivers become available again.
+    If unavailable_driver_id is provided, that driver
+    remains unavailable.
 
-    Pantry capacity is restored.
+    Examples:
+
+    Driver cancellation:
+        James -> unavailable
+        everyone else -> available
+
+    Pantry capacity change:
+        all drivers -> available
     """
 
     # =====================================================
@@ -1010,9 +1017,6 @@ def _release_resources_for_replan(
         pantry_id,
         reserved_lbs,
     ) in pantry_reservations.items():
-
-        # MIN prevents accidental capacity from exceeding
-        # the pantry's original maximum.
 
         conn.execute(
             """
@@ -1046,21 +1050,20 @@ def _release_resources_for_replan(
     for driver_id in driver_ids:
 
         if (
+            unavailable_driver_id
+            is not None
+            and
             driver_id
             ==
-            cancelled_driver_id
+            unavailable_driver_id
         ):
-
-            # IMPORTANT:
-            #
-            # The cancelled driver must NOT become available,
-            # otherwise the optimizer could immediately
-            # assign them again.
 
             conn.execute(
                 """
                 UPDATE drivers
+
                 SET status = 'unavailable'
+
                 WHERE id = ?
                 """,
                 (
@@ -1073,7 +1076,9 @@ def _release_resources_for_replan(
             conn.execute(
                 """
                 UPDATE drivers
+
                 SET status = 'available'
+
                 WHERE id = ?
                 """,
                 (
@@ -1082,29 +1087,53 @@ def _release_resources_for_replan(
             )
 
     # =====================================================
-    # OLD ROUTES ARE NO LONGER VALID
+    # INVALIDATE OLD ROUTES
     # =====================================================
 
-    conn.execute(
-        """
-        UPDATE driver_routes
+    if unavailable_driver_id is None:
 
-        SET status =
-            CASE
-                WHEN driver_id = ?
-                    THEN 'cancelled'
-                ELSE 'released'
-            END
+        # No particular driver failed.
+        #
+        # Example:
+        # pantry capacity changed.
+        conn.execute(
+            """
+            UPDATE driver_routes
 
-        WHERE operation_id = ?
-        """,
-        (
-            cancelled_driver_id,
-            operation_id,
-        ),
-    )
+            SET status = 'released'
 
-    # The stops belong to the abandoned plan.
+            WHERE operation_id = ?
+            """,
+            (
+                operation_id,
+            ),
+        )
+
+    else:
+
+        # Driver cancellation.
+        conn.execute(
+            """
+            UPDATE driver_routes
+
+            SET status =
+                CASE
+                    WHEN driver_id = ?
+                        THEN 'cancelled'
+                    ELSE 'released'
+                END
+
+            WHERE operation_id = ?
+            """,
+            (
+                unavailable_driver_id,
+                operation_id,
+            ),
+        )
+
+    # =====================================================
+    # CANCEL OLD STOPS
+    # =====================================================
 
     conn.execute(
         """
@@ -1114,7 +1143,9 @@ def _release_resources_for_replan(
 
         WHERE route_id IN (
             SELECT id
+
             FROM driver_routes
+
             WHERE operation_id = ?
         )
         """,
@@ -1124,7 +1155,7 @@ def _release_resources_for_replan(
     )
 
     # =====================================================
-    # OLD OPERATION NEEDS A NEW PLAN
+    # MARK OPERATION FOR REPLAN
     # =====================================================
 
     conn.execute(
@@ -1142,8 +1173,9 @@ def _release_resources_for_replan(
         ),
     )
 
-    # The donation is available for planning again because
-    # NO deliveries have happened yet.
+    # =====================================================
+    # MAKE DONATION PLANNABLE AGAIN
+    # =====================================================
 
     conn.execute(
         """
@@ -1153,7 +1185,9 @@ def _release_resources_for_replan(
 
         WHERE id = (
             SELECT donation_id
+
             FROM operations
+
             WHERE id = ?
         )
         """,
@@ -1170,6 +1204,608 @@ def _release_resources_for_replan(
             pantry_reservations,
     }
 
+
+def change_pantry_capacity_and_replan(
+    operation_id,
+    pantry_id,
+    new_max_capacity_lbs,
+):
+    """
+    Change a pantry's TOTAL capacity.
+
+    If the currently active rescue plan still fits,
+    keep the operation active.
+
+    If the reservation no longer fits:
+
+        release old operation resources
+        apply new pantry capacity
+        re-run optimizer
+        create replacement operation
+        activate replacement operation
+
+    Current safety rule:
+
+    We only automatically replan if NO delivery has
+    been completed yet.
+    """
+
+    if new_max_capacity_lbs < 0:
+
+        raise ValueError(
+            "Pantry capacity cannot be negative."
+        )
+
+    conn = get_connection()
+
+    needs_replan = False
+    donation_id = None
+    old_max_capacity = None
+    old_available_capacity = None
+    reserved_lbs = 0
+
+    try:
+
+        conn.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        # =================================================
+        # LOAD OPERATION
+        # =================================================
+
+        operation = conn.execute(
+            """
+            SELECT *
+
+            FROM operations
+
+            WHERE id = ?
+            """,
+            (
+                operation_id,
+            ),
+        ).fetchone()
+
+        if operation is None:
+
+            raise ValueError(
+                f"Operation {operation_id} "
+                f"does not exist."
+            )
+
+        if operation["status"] != "active":
+
+            raise ValueError(
+                f"Operation {operation_id} "
+                f"is not active."
+            )
+
+        donation_id = (
+            operation[
+                "donation_id"
+            ]
+        )
+
+        # =================================================
+        # SAFETY:
+        # NO FULL REPLAN AFTER A DELIVERY OCCURRED
+        # =================================================
+
+        completed_count = conn.execute(
+            """
+            SELECT COUNT(*)
+
+            FROM delivery_stops s
+
+            JOIN driver_routes r
+                ON r.id = s.route_id
+
+            WHERE
+                r.operation_id = ?
+                AND
+                s.status = 'completed'
+            """,
+            (
+                operation_id,
+            ),
+        ).fetchone()[0]
+
+        if completed_count > 0:
+
+            raise ValueError(
+                "Automatic full replanning is not "
+                "allowed after a delivery has already "
+                "been completed. Remaining-state "
+                "replanning is required."
+            )
+
+        # =================================================
+        # LOAD PANTRY
+        # =================================================
+
+        pantry = conn.execute(
+            """
+            SELECT
+                id,
+                name,
+                max_capacity_lbs,
+                available_capacity_lbs
+
+            FROM pantries
+
+            WHERE id = ?
+            """,
+            (
+                pantry_id,
+            ),
+        ).fetchone()
+
+        if pantry is None:
+
+            raise ValueError(
+                f"Pantry {pantry_id} "
+                f"does not exist."
+            )
+
+        old_max_capacity = (
+            pantry[
+                "max_capacity_lbs"
+            ]
+        )
+
+        old_available_capacity = (
+            pantry[
+                "available_capacity_lbs"
+            ]
+        )
+
+        # =================================================
+        # FIND HOW MUCH THIS OPERATION RESERVED HERE
+        # =================================================
+
+        pantry_reservations = (
+            _get_operation_pantry_reservations(
+                conn,
+                operation_id,
+            )
+        )
+
+        reserved_lbs = (
+            pantry_reservations.get(
+                pantry_id,
+                0.0,
+            )
+        )
+
+        # =================================================
+        # HOW MUCH CAPACITY WAS ALREADY OCCUPIED BEFORE
+        # THIS OPERATION RESERVED SPACE?
+        # =================================================
+        #
+        # Example:
+        #
+        # max capacity = 180
+        #
+        # before rescue:
+        # available = 150
+        #
+        # therefore existing food = 30
+        #
+        # operation reserves 150
+        #
+        # current available = 0
+        #
+        # occupied_before_reservation:
+        #
+        # 180 - 0 - 150 = 30
+        # =================================================
+
+        occupied_before_reservation = max(
+            0.0,
+            old_max_capacity
+            -
+            old_available_capacity
+            -
+            reserved_lbs,
+        )
+
+        capacity_available_for_operation = max(
+            0.0,
+            new_max_capacity_lbs
+            -
+            occupied_before_reservation,
+        )
+
+        # =================================================
+        # CURRENT PLAN STILL FITS
+        # =================================================
+
+        if (
+            reserved_lbs
+            <=
+            capacity_available_for_operation
+            + 0.001
+        ):
+
+            new_available = max(
+                0.0,
+
+                new_max_capacity_lbs
+                -
+                occupied_before_reservation
+                -
+                reserved_lbs,
+            )
+
+            conn.execute(
+                """
+                UPDATE pantries
+
+                SET
+                    max_capacity_lbs = ?,
+                    available_capacity_lbs = ?
+
+                WHERE id = ?
+                """,
+                (
+                    new_max_capacity_lbs,
+                    new_available,
+                    pantry_id,
+                ),
+            )
+
+            record_event(
+                operation_id,
+
+                "PANTRY_CAPACITY_CHANGED",
+
+                {
+                    "pantry_id":
+                        pantry_id,
+
+                    "old_max_capacity_lbs":
+                        old_max_capacity,
+
+                    "new_max_capacity_lbs":
+                        new_max_capacity_lbs,
+
+                    "reserved_lbs":
+                        reserved_lbs,
+
+                    "triggered_replan":
+                        False,
+                },
+
+                connection=conn,
+            )
+
+            conn.commit()
+
+            return {
+                "status":
+                    "capacity_updated",
+
+                "operation_id":
+                    operation_id,
+
+                "pantry_id":
+                    pantry_id,
+
+                "replanned":
+                    False,
+            }
+
+        # =================================================
+        # CURRENT PLAN NO LONGER FITS
+        # =================================================
+
+        needs_replan = True
+
+        # First release the WHOLE old plan using the old
+        # capacity values.
+        _release_resources_for_replan(
+            conn,
+            operation_id,
+        )
+
+        # After releasing this operation, determine how much
+        # REAL pre-existing capacity is occupied.
+
+        pantry_after_release = conn.execute(
+            """
+            SELECT
+                max_capacity_lbs,
+                available_capacity_lbs
+
+            FROM pantries
+
+            WHERE id = ?
+            """,
+            (
+                pantry_id,
+            ),
+        ).fetchone()
+
+        occupied_without_operation = max(
+            0.0,
+
+            pantry_after_release[
+                "max_capacity_lbs"
+            ]
+            -
+            pantry_after_release[
+                "available_capacity_lbs"
+            ],
+        )
+
+        new_available = max(
+            0.0,
+
+            new_max_capacity_lbs
+            -
+            occupied_without_operation,
+        )
+
+        # NOW apply the new capacity.
+
+        conn.execute(
+            """
+            UPDATE pantries
+
+            SET
+                max_capacity_lbs = ?,
+                available_capacity_lbs = ?
+
+            WHERE id = ?
+            """,
+            (
+                new_max_capacity_lbs,
+                new_available,
+                pantry_id,
+            ),
+        )
+
+        record_event(
+            operation_id,
+
+            "PANTRY_CAPACITY_CHANGED",
+
+            {
+                "pantry_id":
+                    pantry_id,
+
+                "old_max_capacity_lbs":
+                    old_max_capacity,
+
+                "new_max_capacity_lbs":
+                    new_max_capacity_lbs,
+
+                "reserved_lbs":
+                    reserved_lbs,
+
+                "triggered_replan":
+                    True,
+            },
+
+            connection=conn,
+        )
+
+        record_event(
+            operation_id,
+
+            "RESOURCES_RELEASED",
+
+            {
+                "reason":
+                    "pantry_capacity_changed"
+            },
+
+            connection=conn,
+        )
+
+        conn.commit()
+
+    except Exception:
+
+        conn.rollback()
+
+        raise
+
+    finally:
+
+        conn.close()
+
+    # =====================================================
+    # NO REPLAN NEEDED
+    # =====================================================
+
+    if not needs_replan:
+
+        return {
+            "status":
+                "capacity_updated",
+
+            "operation_id":
+                operation_id,
+
+            "replanned":
+                False,
+        }
+
+    # =====================================================
+    # RUN OPTIMIZER AGAIN
+    # =====================================================
+
+    from app.optimizer.rescue_optimizer import (
+        optimize_rescue_plan,
+    )
+
+    new_plan = (
+        optimize_rescue_plan(
+            donation_id
+        )
+    )
+
+    # =====================================================
+    # NO REPLACEMENT PLAN
+    # =====================================================
+
+    if (
+        new_plan.get(
+            "status"
+        )
+        !=
+        "optimal"
+    ):
+
+        record_event(
+            operation_id,
+
+            "REPLAN_FAILED",
+
+            {
+                "reason":
+                    "pantry_capacity_changed",
+
+                "optimizer_status":
+                    new_plan.get(
+                        "status"
+                    ),
+
+                "optimizer_reason":
+                    new_plan.get(
+                        "reason"
+                    ),
+            },
+        )
+
+        return {
+            "status":
+                "replan_failed",
+
+            "old_operation_id":
+                operation_id,
+
+            "plan":
+                new_plan,
+        }
+
+    # =====================================================
+    # CREATE REPLACEMENT
+    # =====================================================
+
+    new_operation_id = (
+        create_operation_from_plan(
+            new_plan
+        )
+    )
+
+    try:
+
+        start_operation(
+            new_operation_id
+        )
+
+    except Exception as error:
+
+        record_event(
+            operation_id,
+
+            "REPLAN_ACTIVATION_FAILED",
+
+            {
+                "reason":
+                    "pantry_capacity_changed",
+
+                "new_operation_id":
+                    new_operation_id,
+
+                "error":
+                    str(error),
+            },
+        )
+
+        return {
+            "status":
+                "activation_failed",
+
+            "old_operation_id":
+                operation_id,
+
+            "new_operation_id":
+                new_operation_id,
+
+            "error":
+                str(error),
+        }
+
+    # =====================================================
+    # OLD OPERATION REPLACED
+    # =====================================================
+
+    update_operation_status(
+        operation_id,
+        "superseded",
+    )
+
+    record_event(
+        operation_id,
+
+        "REPLAN_CREATED",
+
+        {
+            "reason":
+                "pantry_capacity_changed",
+
+            "pantry_id":
+                pantry_id,
+
+            "replacement_operation_id":
+                new_operation_id,
+
+            "new_drivers_used":
+                new_plan[
+                    "drivers_used"
+                ],
+        },
+    )
+
+    record_event(
+        new_operation_id,
+
+        "REPLAN_FROM_OPERATION",
+
+        {
+            "previous_operation_id":
+                operation_id,
+
+            "reason":
+                "pantry_capacity_changed",
+
+            "pantry_id":
+                pantry_id,
+        },
+    )
+
+    return {
+        "status":
+            "replanned",
+
+        "old_operation_id":
+            operation_id,
+
+        "new_operation_id":
+            new_operation_id,
+
+        "new_plan":
+            new_plan,
+
+        "new_operation":
+            get_operation(
+                new_operation_id
+            ),
+    }
 
 
 def cancel_driver_and_replan(

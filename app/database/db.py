@@ -7,11 +7,34 @@ DB_PATH = Path("data/rescuemesh.db")
 def get_connection():
     """
     Create and return a SQLite database connection.
-    """
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    Foreign key enforcement is enabled so relationships like:
+
+        operations -> donations
+        driver_routes -> operations
+        delivery_stops -> driver_routes
+
+    are actually enforced by SQLite.
+    """
+
+    DB_PATH.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    conn = sqlite3.connect(
+        DB_PATH
+    )
+
+    conn.row_factory = (
+        sqlite3.Row
+    )
+
+    # SQLite does not enforce foreign keys by default.
+    # Enable them for every new connection.
+    conn.execute(
+        "PRAGMA foreign_keys = ON"
+    )
 
     return conn
 
@@ -106,6 +129,102 @@ def create_tables():
             status TEXT NOT NULL DEFAULT 'available',
             FOREIGN KEY (donor_id) REFERENCES donors(id)
         )
+        """
+    )
+    
+    cursor.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS operations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+            donation_id INTEGER NOT NULL,
+
+            status TEXT NOT NULL DEFAULT 'planned',
+
+            rescued_lbs REAL NOT NULL,
+            unrescued_lbs REAL NOT NULL,
+            rescue_rate REAL NOT NULL,
+
+            total_distance_miles REAL NOT NULL,
+
+            created_at TEXT NOT NULL
+                DEFAULT CURRENT_TIMESTAMP,
+
+            updated_at TEXT NOT NULL
+                DEFAULT CURRENT_TIMESTAMP,
+
+            FOREIGN KEY (donation_id)
+                REFERENCES donations(id)
+        );
+
+
+        CREATE TABLE IF NOT EXISTS driver_routes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+            operation_id INTEGER NOT NULL,
+            driver_id INTEGER NOT NULL,
+
+            assigned_lbs REAL NOT NULL,
+
+            pickup_start TEXT NOT NULL,
+            pickup_complete TEXT NOT NULL,
+
+            route_complete TEXT NOT NULL,
+
+            distance_miles REAL NOT NULL,
+
+            status TEXT NOT NULL
+                DEFAULT 'assigned',
+
+            FOREIGN KEY (operation_id)
+                REFERENCES operations(id)
+                ON DELETE CASCADE,
+
+            FOREIGN KEY (driver_id)
+                REFERENCES drivers(id)
+        );
+
+
+        CREATE TABLE IF NOT EXISTS delivery_stops (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+            route_id INTEGER NOT NULL,
+            pantry_id INTEGER NOT NULL,
+
+            stop_order INTEGER NOT NULL,
+
+            quantity_lbs REAL NOT NULL,
+
+            eta TEXT NOT NULL,
+
+            status TEXT NOT NULL
+                DEFAULT 'pending',
+
+            FOREIGN KEY (route_id)
+                REFERENCES driver_routes(id)
+                ON DELETE CASCADE,
+
+            FOREIGN KEY (pantry_id)
+                REFERENCES pantries(id)
+        );
+
+
+        CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+            operation_id INTEGER NOT NULL,
+
+            event_type TEXT NOT NULL,
+
+            details TEXT,
+
+            created_at TEXT NOT NULL
+                DEFAULT CURRENT_TIMESTAMP,
+
+            FOREIGN KEY (operation_id)
+                REFERENCES operations(id)
+                ON DELETE CASCADE
+        );
         """
     )
 

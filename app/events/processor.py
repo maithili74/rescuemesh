@@ -8,14 +8,16 @@ from app.events.types import (
 )
 
 from app.operations.execution import (
+    accept_driver_assignment,
     cancel_driver_and_replan,
     change_pantry_capacity_and_replan,
     complete_delivery_stop,
     complete_operation,
+    complete_pickup,
     get_operation,
+    plan_new_donation,
     record_event,
 )
-
 
 # =========================================================
 # PAYLOAD HELPERS
@@ -247,11 +249,83 @@ def _handle_pantry_capacity_changed(
     )
 
 
+
+# =========================================================
+# DONATION CREATED
+# =========================================================
+
+def _handle_donation_created(
+    operation_id,
+    payload,
+):
+    """
+    operation_id is None here because an operation
+    does not exist yet.
+    """
+
+    donation_id = _require_field(
+        payload,
+        "donation_id",
+    )
+
+    return plan_new_donation(
+        donation_id
+    )
+
+
+# =========================================================
+# DRIVER ACCEPTED
+# =========================================================
+
+def _handle_driver_accepted(
+    operation_id,
+    payload,
+):
+    driver_id = _require_field(
+        payload,
+        "driver_id",
+    )
+
+    return accept_driver_assignment(
+        operation_id,
+        driver_id,
+    )
+
+
+# =========================================================
+# PICKUP COMPLETED
+# =========================================================
+
+def _handle_pickup_completed(
+    operation_id,
+    payload,
+):
+    driver_id = _require_field(
+        payload,
+        "driver_id",
+    )
+
+    return complete_pickup(
+        operation_id,
+        driver_id,
+    )
+
+
 # =========================================================
 # HANDLER MAP
 # =========================================================
 
 EVENT_HANDLERS = {
+
+    EventType.DONATION_CREATED.value:
+        _handle_donation_created,
+
+    EventType.DRIVER_ACCEPTED.value:
+        _handle_driver_accepted,
+
+    EventType.PICKUP_COMPLETED.value:
+        _handle_pickup_completed,
+
     EventType.DRIVER_CANCELLED.value:
         _handle_driver_cancelled,
 
@@ -261,7 +335,6 @@ EVENT_HANDLERS = {
     EventType.PANTRY_CAPACITY_CHANGED.value:
         _handle_pantry_capacity_changed,
 }
-
 
 # =========================================================
 # RESULT SUMMARY FOR EVENT LOG
@@ -413,24 +486,67 @@ def process_event(
         # EVENT SUCCESS
         # =================================================
 
-        record_event(
-            operation_id,
+                # =================================================
+        # WHICH OPERATION SHOULD OWN THE AUDIT EVENT?
+        # =================================================
+        #
+        # For normal events:
+        #
+        #     use supplied operation_id
+        #
+        # For DONATION_CREATED:
+        #
+        #     no operation existed before processing,
+        #     so use the operation created by the handler.
+        # =================================================
 
-            "EVENT_PROCESSED",
-
-            {
-                "trigger_event":
-                    event_type,
-
-                "payload":
-                    payload,
-
-                "result":
-                    _summarize_result(
-                        result
-                    ),
-            },
+        log_operation_id = (
+            operation_id
         )
+
+        if (
+            log_operation_id
+            is None
+            and
+            isinstance(
+                result,
+                dict,
+            )
+        ):
+
+            log_operation_id = (
+                result.get(
+                    "operation_id"
+                )
+                or
+                result.get(
+                    "new_operation_id"
+                )
+            )
+
+        if (
+            log_operation_id
+            is not None
+        ):
+
+            record_event(
+                log_operation_id,
+
+                "EVENT_PROCESSED",
+
+                {
+                    "trigger_event":
+                        event_type,
+
+                    "payload":
+                        payload,
+
+                    "result":
+                        _summarize_result(
+                            result
+                        ),
+                },
+            )
 
         return {
             "status":
@@ -440,12 +556,11 @@ def process_event(
                 event_type,
 
             "operation_id":
-                operation_id,
+                log_operation_id,
 
             "result":
                 result,
         }
-
     except Exception as error:
 
         # =================================================

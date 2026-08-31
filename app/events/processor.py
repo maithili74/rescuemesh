@@ -11,10 +11,14 @@ from app.operations.execution import (
     accept_driver_assignment,
     cancel_driver_and_replan,
     change_pantry_capacity_and_replan,
-    complete_delivery_stop,
+    close_pantry_and_replan,
     complete_operation,
     complete_pickup,
+    confirm_pantry_received,
+    expire_donation,
+    fail_delivery,
     get_operation,
+    mark_delivery_by_driver,
     plan_new_donation,
     record_event,
 )
@@ -80,131 +84,91 @@ def _handle_delivery_completed(
         "stop_id",
     )
 
-    conn = get_connection()
+    return mark_delivery_by_driver(
+        operation_id,
+        stop_id,
+    )
+    
+    
+# =========================================================
+# PANTRY RECEIVED
+# =========================================================
 
-    try:
-
-        # Make sure this stop actually belongs to the
-        # operation supplied in the event.
-
-        row = conn.execute(
-            """
-            SELECT
-                s.id,
-                s.status,
-                r.operation_id
-
-            FROM delivery_stops s
-
-            JOIN driver_routes r
-                ON r.id = s.route_id
-
-            WHERE s.id = ?
-            """,
-            (
-                stop_id,
-            ),
-        ).fetchone()
-
-        if row is None:
-
-            raise ValueError(
-                f"Delivery stop "
-                f"{stop_id} "
-                f"does not exist."
-            )
-
-        if (
-            row[
-                "operation_id"
-            ]
-            !=
-            operation_id
-        ):
-
-            raise ValueError(
-                f"Delivery stop {stop_id} "
-                f"does not belong to "
-                f"operation {operation_id}."
-            )
-
-        if (
-            row[
-                "status"
-            ]
-            ==
-            "completed"
-        ):
-
-            raise ValueError(
-                f"Delivery stop {stop_id} "
-                f"is already completed."
-            )
-
-    finally:
-
-        conn.close()
-
-    # Actual state change stays in execution.py.
-
-    complete_delivery_stop(
-        stop_id
+def _handle_pantry_received(
+    operation_id,
+    payload,
+):
+    stop_id = _require_field(
+        payload,
+        "stop_id",
     )
 
-    # =====================================================
-    # CHECK IF THIS WAS THE LAST DELIVERY
-    # =====================================================
+    return confirm_pantry_received(
+        operation_id,
+        stop_id,
+    )
 
-    conn = get_connection()
 
-    try:
+# =========================================================
+# PANTRY CLOSED
+# =========================================================
 
-        pending_count = (
-            conn.execute(
-                """
-                SELECT COUNT(*)
+def _handle_pantry_closed(
+    operation_id,
+    payload,
+):
+    pantry_id = _require_field(
+        payload,
+        "pantry_id",
+    )
 
-                FROM delivery_stops s
+    return close_pantry_and_replan(
+        operation_id,
+        pantry_id,
+    )
 
-                JOIN driver_routes r
-                    ON r.id = s.route_id
 
-                WHERE
-                    r.operation_id = ?
-                    AND
-                    s.status != 'completed'
-                """,
-                (
-                    operation_id,
-                ),
-            ).fetchone()[0]
-        )
+# =========================================================
+# DELIVERY FAILED
+# =========================================================
 
-    finally:
+def _handle_delivery_failed(
+    operation_id,
+    payload,
+):
+    stop_id = _require_field(
+        payload,
+        "stop_id",
+    )
 
-        conn.close()
+    reason = payload.get(
+        "reason"
+    )
 
-    operation_completed = False
+    return fail_delivery(
+        operation_id,
+        stop_id,
+        reason,
+    )
 
-    if pending_count == 0:
 
-        complete_operation(
-            operation_id
-        )
+# =========================================================
+# DONATION EXPIRED
+# =========================================================
 
-        operation_completed = True
+def _handle_donation_expired(
+    operation_id,
+    payload,
+):
+    donation_id = _require_field(
+        payload,
+        "donation_id",
+    )
 
-    return {
-        "status":
-            "delivery_completed",
-
-        "stop_id":
-            stop_id,
-
-        "operation_completed":
-            operation_completed,
-    }
-
+    return expire_donation(
+        donation_id,
+        operation_id,
+    )    
 
 # =========================================================
 # PANTRY CAPACITY CHANGED
@@ -326,14 +290,26 @@ EVENT_HANDLERS = {
     EventType.PICKUP_COMPLETED.value:
         _handle_pickup_completed,
 
-    EventType.DRIVER_CANCELLED.value:
-        _handle_driver_cancelled,
-
     EventType.DELIVERY_COMPLETED.value:
         _handle_delivery_completed,
 
+    EventType.PANTRY_RECEIVED.value:
+        _handle_pantry_received,
+
+    EventType.DRIVER_CANCELLED.value:
+        _handle_driver_cancelled,
+
     EventType.PANTRY_CAPACITY_CHANGED.value:
         _handle_pantry_capacity_changed,
+
+    EventType.PANTRY_CLOSED.value:
+        _handle_pantry_closed,
+
+    EventType.DELIVERY_FAILED.value:
+        _handle_delivery_failed,
+
+    EventType.DONATION_EXPIRED.value:
+        _handle_donation_expired,
 }
 
 # =========================================================
@@ -365,10 +341,12 @@ def _summarize_result(
         "old_operation_id",
         "new_operation_id",
         "operation_id",
+        "donation_id",
         "stop_id",
         "operation_completed",
         "pantry_id",
         "replanned",
+        "failed_quantity_lbs",
     ]
 
     return {

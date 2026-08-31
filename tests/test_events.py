@@ -997,3 +997,381 @@ def test_pantry_capacity_drop_triggers_replan(
         ==
         0
     )
+    
+# donation created
+    
+def test_donation_created_builds_planned_operation(
+    event_db,
+    monkeypatch,
+):
+
+    monkeypatch.setattr(
+        optimizer,
+        "optimize_rescue_plan",
+        lambda donation_id:
+            original_plan(),
+    )
+
+    result = (
+        processor.process_event(
+            None,
+
+            "DONATION_CREATED",
+
+            {
+                "donation_id":
+                    1
+            },
+        )
+    )
+
+    assert (
+        result["status"]
+        ==
+        "processed"
+    )
+
+    operation_id = (
+        result[
+            "result"
+        ][
+            "operation_id"
+        ]
+    )
+
+    operation = get_operation(
+        operation_id
+    )
+
+    # Operation exists, but is not active yet.
+    assert (
+        operation["status"]
+        ==
+        "planned"
+    )
+
+    # Driver hasn't accepted yet.
+    assert (
+        operation[
+            "driver_routes"
+        ][0][
+            "status"
+        ]
+        ==
+        "assigned"
+    )
+
+    # Driver should NOT be busy yet.
+    assert (
+        get_driver_status(1)
+        ==
+        "available"
+    )
+
+    event_types = [
+        event["event_type"]
+
+        for event in operation[
+            "events"
+        ]
+    ]
+
+    assert (
+        "DONATION_CREATED"
+        in event_types
+    )
+
+    assert (
+        "EVENT_PROCESSED"
+        in event_types
+    ) 
+    
+# driver accepted
+
+def test_driver_acceptance_starts_single_driver_operation(
+    event_db,
+):
+
+    operation_id = (
+        create_operation_from_plan(
+            original_plan()
+        )
+    )
+
+    result = (
+        processor.process_event(
+            operation_id,
+
+            "DRIVER_ACCEPTED",
+
+            {
+                "driver_id":
+                    1
+            },
+        )
+    )
+
+    assert (
+        result["status"]
+        ==
+        "processed"
+    )
+
+    assert (
+        result[
+            "result"
+        ][
+            "status"
+        ]
+        ==
+        "operation_started"
+    )
+
+    operation = get_operation(
+        operation_id
+    )
+
+    assert (
+        operation["status"]
+        ==
+        "active"
+    )
+
+    assert (
+        operation[
+            "driver_routes"
+        ][0][
+            "status"
+        ]
+        ==
+        "active"
+    )
+
+    assert (
+        get_driver_status(1)
+        ==
+        "busy"
+    )
+
+    event_types = [
+        event["event_type"]
+
+        for event in operation[
+            "events"
+        ]
+    ]
+
+    assert (
+        "DRIVER_ACCEPTED"
+        in event_types
+    )
+
+    assert (
+        "OPERATION_STARTED"
+        in event_types
+    )
+    
+# pickup completed
+
+def test_pickup_completed_marks_route_picked_up(
+    event_db,
+):
+
+    operation_id = (
+        create_operation_from_plan(
+            original_plan()
+        )
+    )
+
+    # Driver accepts, which starts the one-driver operation.
+
+    processor.process_event(
+        operation_id,
+
+        "DRIVER_ACCEPTED",
+
+        {
+            "driver_id":
+                1
+        },
+    )
+
+    result = (
+        processor.process_event(
+            operation_id,
+
+            "PICKUP_COMPLETED",
+
+            {
+                "driver_id":
+                    1
+            },
+        )
+    )
+
+    assert (
+        result["status"]
+        ==
+        "processed"
+    )
+
+    operation = get_operation(
+        operation_id
+    )
+
+    assert (
+        operation[
+            "driver_routes"
+        ][0][
+            "status"
+        ]
+        ==
+        "picked_up"
+    )
+
+    assert (
+        get_driver_status(1)
+        ==
+        "busy"
+    )
+
+    event_types = [
+        event["event_type"]
+
+        for event in operation[
+            "events"
+        ]
+    ]
+
+    assert (
+        "PICKUP_COMPLETED"
+        in event_types
+    )
+    
+# cannot pick up before operation starts
+
+def test_pickup_before_driver_acceptance_fails(
+    event_db,
+):
+
+    operation_id = (
+        create_operation_from_plan(
+            original_plan()
+        )
+    )
+
+    with pytest.raises(
+        ValueError
+    ):
+
+        processor.process_event(
+            operation_id,
+
+            "PICKUP_COMPLETED",
+
+            {
+                "driver_id":
+                    1
+            },
+        )
+
+    operation = get_operation(
+        operation_id
+    )
+
+    assert (
+        operation["status"]
+        ==
+        "planned"
+    )
+
+    event_types = [
+        event["event_type"]
+
+        for event in operation[
+            "events"
+        ]
+    ]
+
+    assert (
+        "EVENT_FAILED"
+        in event_types
+    )
+    
+# cancellation after pickup blocked
+
+def test_full_driver_replan_blocked_after_pickup(
+    event_db,
+):
+
+    operation_id = (
+        create_operation_from_plan(
+            original_plan()
+        )
+    )
+
+    processor.process_event(
+        operation_id,
+
+        "DRIVER_ACCEPTED",
+
+        {
+            "driver_id":
+                1
+        },
+    )
+
+    processor.process_event(
+        operation_id,
+
+        "PICKUP_COMPLETED",
+
+        {
+            "driver_id":
+                1
+        },
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="In-transit replanning",
+    ):
+
+        processor.process_event(
+            operation_id,
+
+            "DRIVER_CANCELLED",
+
+            {
+                "driver_id":
+                    1
+            },
+        )
+
+    operation = get_operation(
+        operation_id
+    )
+
+    # Nothing should have been reset.
+    assert (
+        operation["status"]
+        ==
+        "active"
+    )
+
+    assert (
+        operation[
+            "driver_routes"
+        ][0][
+            "status"
+        ]
+        ==
+        "picked_up"
+    )
+
+    assert (
+        get_driver_status(1)
+        ==
+        "busy"
+    )
+    

@@ -3661,8 +3661,20 @@ def fail_delivery(
         "stop_id":
             stop_id,
 
+        "driver_id":
+            row[
+                "driver_id"
+            ],
+
+        "pantry_id":
+            row[
+                "pantry_id"
+            ],
+
         "failed_quantity_lbs":
-            row["quantity_lbs"],
+            row[
+                "quantity_lbs"
+            ],
 
         "reason":
             reason,
@@ -4531,6 +4543,1146 @@ def expire_donation(
         "operation_id":
             operation_id,
     }        
+    
+    
+def _add_minutes_to_time(
+    time_value,
+    minutes,
+):
+    hour, minute = map(
+        int,
+        time_value.split(":"),
+    )
+
+    total = (
+        hour * 60
+        +
+        minute
+        +
+        minutes
+    )
+
+    return (
+        f"{(total // 60) % 24:02d}:"
+        f"{total % 60:02d}"
+    )
+
+
+# =========================================================
+# PREPARE REMAINING PHYSICAL STATE
+# =========================================================
+
+def _prepare_in_transit_replan(
+    operation_id,
+    driver_id,
+    reason,
+    excluded_pantry_ids=None,
+):
+    """
+    Build the TRUE remaining state after food has already
+    been picked up.
+
+    Rules:
+
+    COMPLETED
+        Food already received.
+        Keep it permanently.
+
+    DRIVER_DELIVERED
+        Food physically left the driver's vehicle and is
+        waiting for pantry confirmation.
+        Keep its reservation.
+
+    PENDING
+        Food still in vehicle.
+        Release old reservation and replan it.
+
+    FAILED
+        Delivery failed.
+        Food is still in vehicle.
+        Release old reservation and replan it.
+    """
+
+    excluded_pantry_ids = set(
+        excluded_pantry_ids
+        or []
+    )
+
+    conn = get_connection()
+
+    try:
+        conn.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        # =================================================
+        # OPERATION + DONATION
+        # =================================================
+
+        operation = conn.execute(
+            """
+            SELECT
+                o.*,
+                d.food_type,
+                dn.latitude AS donor_latitude,
+                dn.longitude AS donor_longitude
+
+            FROM operations o
+
+            JOIN donations d
+                ON d.id = o.donation_id
+
+            JOIN donors dn
+                ON dn.id = d.donor_id
+
+            WHERE o.id = ?
+            """,
+            (
+                operation_id,
+            ),
+        ).fetchone()
+
+        if operation is None:
+
+            raise ValueError(
+                f"Operation {operation_id} "
+                f"does not exist."
+            )
+
+        if (
+            operation["status"]
+            not in (
+                "active",
+                "needs_replan",
+            )
+        ):
+
+            raise ValueError(
+                "In-transit replanning requires "
+                "an active or disrupted operation."
+            )
+
+        # =================================================
+        # DRIVER ROUTE
+        # =================================================
+
+        route = conn.execute(
+            """
+            SELECT
+                r.*,
+                d.name AS driver_name,
+                d.available_until
+
+            FROM driver_routes r
+
+            JOIN drivers d
+                ON d.id = r.driver_id
+
+            WHERE
+                r.operation_id = ?
+                AND
+                r.driver_id = ?
+            """,
+            (
+                operation_id,
+                driver_id,
+            ),
+        ).fetchone()
+
+        if route is None:
+
+            raise ValueError(
+                f"Driver {driver_id} "
+                f"is not assigned to "
+                f"operation {operation_id}."
+            )
+
+        if (
+            route["status"]
+            !=
+            "picked_up"
+        ):
+
+            raise ValueError(
+                "In-transit replanning requires "
+                "the driver to already have the food."
+            )
+
+        # =================================================
+        # ROUTE STOPS
+        # =================================================
+
+        stops = conn.execute(
+            """
+            SELECT
+                s.*,
+                p.name AS pantry_name,
+                p.latitude,
+                p.longitude
+
+            FROM delivery_stops s
+
+            JOIN pantries p
+                ON p.id = s.pantry_id
+
+            WHERE s.route_id = ?
+
+            ORDER BY s.stop_order ASC
+            """,
+            (
+                route["id"],
+            ),
+        ).fetchall()
+
+        # =================================================
+        # ESTIMATE CURRENT DRIVER LOCATION
+        # =================================================
+        #
+        # Until we have GPS:
+        #
+        # no stop reached:
+        #     donor location
+        #
+        # stop reached:
+        #     latest reached pantry
+        # =================================================
+
+        current_latitude = (
+            operation[
+                "donor_latitude"
+            ]
+        )
+
+        current_longitude = (
+            operation[
+                "donor_longitude"
+            ]
+        )
+
+        current_time = (
+            route[
+                "pickup_complete"
+            ]
+        )
+
+        progressed_stops = [
+            stop
+            for stop in stops
+            if stop["status"] in (
+                "completed",
+                "driver_delivered",
+                "failed",
+            )
+        ]
+
+        if progressed_stops:
+
+            latest_stop = max(
+                progressed_stops,
+                key=lambda stop:
+                    stop[
+                        "stop_order"
+                    ],
+            )
+
+            current_latitude = (
+                latest_stop[
+                    "latitude"
+                ]
+            )
+
+            current_longitude = (
+                latest_stop[
+                    "longitude"
+                ]
+            )
+
+            current_time = (
+                _add_minutes_to_time(
+                    latest_stop[
+                        "eta"
+                    ],
+                    5,
+                )
+            )
+
+        # =================================================
+        # FOOD STILL IN VEHICLE
+        # =================================================
+
+        remaining_stops = [
+            stop
+            for stop in stops
+            if stop["status"] in (
+                "pending",
+                "failed",
+            )
+        ]
+
+        remaining_lbs = round(
+            sum(
+                stop[
+                    "quantity_lbs"
+                ]
+
+                for stop
+                in remaining_stops
+            ),
+            2,
+        )
+
+        if remaining_lbs <= 0:
+
+            raise ValueError(
+                "No undelivered food remains "
+                "with this driver."
+            )
+
+        # A failed pantry should not immediately be selected
+        # again for that same failed delivery.
+
+        for stop in remaining_stops:
+
+            if (
+                stop["status"]
+                ==
+                "failed"
+            ):
+
+                excluded_pantry_ids.add(
+                    stop[
+                        "pantry_id"
+                    ]
+                )
+
+        # =================================================
+        # RELEASE ONLY UNUSED RESERVATIONS
+        # =================================================
+
+        released_reservations = {}
+
+        for stop in remaining_stops:
+
+            pantry_id = (
+                stop[
+                    "pantry_id"
+                ]
+            )
+
+            released_reservations[
+                pantry_id
+            ] = (
+                released_reservations.get(
+                    pantry_id,
+                    0.0,
+                )
+                +
+                stop[
+                    "quantity_lbs"
+                ]
+            )
+
+        for (
+            pantry_id,
+            quantity,
+        ) in (
+            released_reservations.items()
+        ):
+
+            conn.execute(
+                """
+                UPDATE pantries
+
+                SET available_capacity_lbs =
+                    MIN(
+                        max_capacity_lbs,
+                        available_capacity_lbs + ?
+                    )
+
+                WHERE id = ?
+                """,
+                (
+                    quantity,
+                    pantry_id,
+                ),
+            )
+
+        # =================================================
+        # PRESERVE OLD HISTORY
+        # =================================================
+
+        # Old pending destinations are no longer valid.
+
+        conn.execute(
+            """
+            UPDATE delivery_stops
+
+            SET status = 'cancelled'
+
+            WHERE
+                route_id = ?
+                AND
+                status = 'pending'
+            """,
+            (
+                route["id"],
+            ),
+        )
+
+        # Failed food was released for replanning.
+        #
+        # Use a distinct state so another retry cannot
+        # restore its pantry capacity twice.
+
+        conn.execute(
+            """
+            UPDATE delivery_stops
+
+            SET status = 'failed_released'
+
+            WHERE
+                route_id = ?
+                AND
+                status = 'failed'
+            """,
+            (
+                route["id"],
+            ),
+        )
+
+        conn.execute(
+            """
+            UPDATE operations
+
+            SET
+                status = 'needs_replan',
+                updated_at = CURRENT_TIMESTAMP
+
+            WHERE id = ?
+            """,
+            (
+                operation_id,
+            ),
+        )
+
+        record_event(
+            operation_id,
+
+            "IN_TRANSIT_REPLAN_STARTED",
+
+            {
+                "reason":
+                    reason,
+
+                "driver_id":
+                    driver_id,
+
+                "route_id":
+                    route["id"],
+
+                "remaining_lbs":
+                    remaining_lbs,
+
+                "released_reservations":
+                    released_reservations,
+
+                "excluded_pantry_ids":
+                    sorted(
+                        excluded_pantry_ids
+                    ),
+            },
+
+            connection=conn,
+        )
+
+        conn.commit()
+
+        return {
+            "operation_id":
+                operation_id,
+
+            "donation_id":
+                operation[
+                    "donation_id"
+                ],
+
+            "route_id":
+                route[
+                    "id"
+                ],
+
+            "driver_id":
+                driver_id,
+
+            "driver_name":
+                route[
+                    "driver_name"
+                ],
+
+            "driver_available_until":
+                route[
+                    "available_until"
+                ],
+
+            "food_type":
+                operation[
+                    "food_type"
+                ],
+
+            "remaining_lbs":
+                remaining_lbs,
+
+            "current_latitude":
+                current_latitude,
+
+            "current_longitude":
+                current_longitude,
+
+            "current_time":
+                current_time,
+
+            "excluded_pantry_ids":
+                sorted(
+                    excluded_pantry_ids
+                ),
+        }
+
+    except Exception:
+
+        conn.rollback()
+        raise
+
+    finally:
+
+        conn.close()
+
+
+# =========================================================
+# APPLY REPLACEMENT ROUTE
+# =========================================================
+
+def _apply_in_transit_plan(
+    state,
+    plan,
+):
+    """
+    Apply the replacement destinations to the SAME route.
+
+    The driver already has the food, so we do not:
+
+    - create another pickup
+    - release the driver
+    - create another donor pickup
+    - create an entirely fake fresh operation
+    """
+
+    operation_id = (
+        state[
+            "operation_id"
+        ]
+    )
+
+    route_id = (
+        state[
+            "route_id"
+        ]
+    )
+
+    conn = get_connection()
+
+    try:
+        conn.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        route = conn.execute(
+            """
+            SELECT *
+
+            FROM driver_routes
+
+            WHERE id = ?
+            """,
+            (
+                route_id,
+            ),
+        ).fetchone()
+
+        if route is None:
+
+            raise ValueError(
+                f"Route {route_id} "
+                f"does not exist."
+            )
+
+        if (
+            route["status"]
+            !=
+            "picked_up"
+        ):
+
+            raise ValueError(
+                "Driver route is no longer "
+                "eligible for in-transit replanning."
+            )
+
+        # =================================================
+        # RESERVE NEW PANTRY CAPACITY
+        # =================================================
+
+        for assignment in (
+            plan[
+                "assignments"
+            ]
+        ):
+
+            pantry_id = (
+                assignment[
+                    "pantry_id"
+                ]
+            )
+
+            quantity = float(
+                assignment[
+                    "quantity_lbs"
+                ]
+            )
+
+            cursor = conn.execute(
+                """
+                UPDATE pantries
+
+                SET available_capacity_lbs =
+                    available_capacity_lbs - ?
+
+                WHERE
+                    id = ?
+                    AND
+                    status = 'available'
+                    AND
+                    available_capacity_lbs >= ?
+                """,
+                (
+                    quantity,
+                    pantry_id,
+                    quantity,
+                ),
+            )
+
+            if cursor.rowcount != 1:
+
+                raise ValueError(
+                    f"Pantry {pantry_id} "
+                    f"no longer has enough "
+                    f"available capacity."
+                )
+
+        # =================================================
+        # APPEND REPLACEMENT STOPS
+        # =================================================
+
+        current_max_order = (
+            conn.execute(
+                """
+                SELECT COALESCE(
+                    MAX(stop_order),
+                    0
+                )
+
+                FROM delivery_stops
+
+                WHERE route_id = ?
+                """,
+                (
+                    route_id,
+                ),
+            ).fetchone()[0]
+        )
+
+        for (
+            offset,
+            stop,
+        ) in enumerate(
+            plan[
+                "stops"
+            ],
+            start=1,
+        ):
+
+            conn.execute(
+                """
+                INSERT INTO delivery_stops (
+                    route_id,
+                    pantry_id,
+                    stop_order,
+                    quantity_lbs,
+                    eta,
+                    status
+                )
+
+                VALUES (
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    'pending'
+                )
+                """,
+                (
+                    route_id,
+
+                    stop[
+                        "pantry_id"
+                    ],
+
+                    current_max_order
+                    +
+                    offset,
+
+                    stop[
+                        "quantity_lbs"
+                    ],
+
+                    stop[
+                        "arrival_time"
+                    ],
+                ),
+            )
+
+        # =================================================
+        # UPDATE CURRENT ROUTE
+        # =================================================
+
+        conn.execute(
+            """
+            UPDATE driver_routes
+
+            SET route_complete = ?
+
+            WHERE id = ?
+            """,
+            (
+                plan[
+                    "route_complete"
+                ],
+                route_id,
+            ),
+        )
+
+        # Same operation becomes active again.
+
+        conn.execute(
+            """
+            UPDATE operations
+
+            SET
+                status = 'active',
+                updated_at = CURRENT_TIMESTAMP
+
+            WHERE id = ?
+            """,
+            (
+                operation_id,
+            ),
+        )
+
+        record_event(
+            operation_id,
+
+            "IN_TRANSIT_REPLAN_APPLIED",
+
+            {
+                "driver_id":
+                    state[
+                        "driver_id"
+                    ],
+
+                "route_id":
+                    route_id,
+
+                "remaining_lbs":
+                    state[
+                        "remaining_lbs"
+                    ],
+
+                "replacement_stops":
+                    plan[
+                        "stops"
+                    ],
+
+                "remaining_distance_miles":
+                    plan[
+                        "remaining_distance_miles"
+                    ],
+            },
+
+            connection=conn,
+        )
+
+        conn.commit()
+
+    except Exception:
+
+        conn.rollback()
+        raise
+
+    finally:
+
+        conn.close()
+
+    return get_operation(
+        operation_id
+    )
+
+
+# =========================================================
+# PUBLIC IN-TRANSIT REPLAN
+# =========================================================
+
+def replan_in_transit(
+    operation_id,
+    driver_id,
+    reason,
+    excluded_pantry_ids=None,
+):
+    """
+    Replan ONLY the food still carried by this driver.
+
+    If every remaining pound can be safely rerouted:
+        apply automatically.
+
+    Otherwise:
+        do not silently accept a partial solution.
+        hand the problem to human escalation.
+    """
+
+    state = (
+        _prepare_in_transit_replan(
+            operation_id,
+            driver_id,
+            reason,
+            excluded_pantry_ids,
+        )
+    )
+
+    from app.optimizer.in_transit_optimizer import (
+        optimize_in_transit_route,
+    )
+
+    plan = (
+        optimize_in_transit_route(
+            state
+        )
+    )
+
+    # =====================================================
+    # FULL AUTONOMOUS RECOVERY
+    # =====================================================
+
+    if (
+        plan.get(
+            "status"
+        )
+        ==
+        "optimal"
+    ):
+
+        try:
+            operation = (
+                _apply_in_transit_plan(
+                    state,
+                    plan,
+                )
+            )
+
+        except Exception as error:
+
+            record_event(
+                operation_id,
+
+                "IN_TRANSIT_REPLAN_ACTIVATION_FAILED",
+
+                {
+                    "reason":
+                        reason,
+
+                    "driver_id":
+                        driver_id,
+
+                    "error":
+                        str(error),
+                },
+            )
+
+            return {
+                "status":
+                    "requires_human_escalation",
+
+                "operation_id":
+                    operation_id,
+
+                "driver_id":
+                    driver_id,
+
+                "remaining_lbs":
+                    state[
+                        "remaining_lbs"
+                    ],
+
+                "reason":
+                    "replacement_plan_could_not_be_applied",
+
+                "error":
+                    str(error),
+
+                "plan":
+                    plan,
+            }
+
+        return {
+            "status":
+                "in_transit_replanned",
+
+            "operation_id":
+                operation_id,
+
+            "driver_id":
+                driver_id,
+
+            "remaining_lbs":
+                state[
+                    "remaining_lbs"
+                ],
+
+            "plan":
+                plan,
+
+            "operation":
+                operation,
+        }
+
+    # =====================================================
+    # AUTONOMOUS RECOVERY NOT GOOD ENOUGH
+    # =====================================================
+
+    record_event(
+        operation_id,
+
+        "IN_TRANSIT_REPLAN_FAILED",
+
+        {
+            "reason":
+                reason,
+
+            "driver_id":
+                driver_id,
+
+            "remaining_lbs":
+                state[
+                    "remaining_lbs"
+                ],
+
+            "optimizer_status":
+                plan.get(
+                    "status"
+                ),
+
+            "rescued_lbs":
+                plan.get(
+                    "rescued_lbs"
+                ),
+
+            "unrescued_lbs":
+                plan.get(
+                    "unrescued_lbs"
+                ),
+        },
+    )
+
+    return {
+        "status":
+            "requires_human_escalation",
+
+        "operation_id":
+            operation_id,
+
+        "driver_id":
+            driver_id,
+
+        "remaining_lbs":
+            state[
+                "remaining_lbs"
+            ],
+
+        "reason":
+            "no_safe_full_remaining_plan",
+
+        "plan":
+            plan,
+    }
+
+
+# =========================================================
+# PANTRY-CLOSURE HELPER
+# =========================================================
+
+def replan_closed_pantry_in_transit(
+    operation_id,
+    pantry_id,
+):
+    """
+    Find picked-up drivers whose undelivered route still
+    depended on the closed pantry and replan those routes.
+    """
+
+    conn = get_connection()
+
+    try:
+
+        rows = conn.execute(
+            """
+            SELECT DISTINCT
+                r.driver_id
+
+            FROM delivery_stops s
+
+            JOIN driver_routes r
+                ON r.id = s.route_id
+
+            WHERE
+                r.operation_id = ?
+                AND
+                s.pantry_id = ?
+                AND
+                r.status = 'picked_up'
+                AND
+                s.status IN (
+                    'pending',
+                    'failed'
+                )
+            """,
+            (
+                operation_id,
+                pantry_id,
+            ),
+        ).fetchall()
+
+    finally:
+
+        conn.close()
+
+    affected_driver_ids = [
+        row[
+            "driver_id"
+        ]
+        for row in rows
+    ]
+
+    # Example:
+    #
+    # driver already delivered food to the pantry and it
+    # closes while waiting for confirmation.
+    #
+    # That is not a routing problem anymore.
+    # Human judgment is appropriate.
+
+    if not affected_driver_ids:
+
+        record_event(
+            operation_id,
+
+            "IN_TRANSIT_REPLAN_FAILED",
+
+            {
+                "reason":
+                    "pantry_closed",
+
+                "pantry_id":
+                    pantry_id,
+
+                "detail":
+                    "No reroutable in-vehicle stop "
+                    "was found.",
+            },
+        )
+
+        return {
+            "status":
+                "requires_human_escalation",
+
+            "operation_id":
+                operation_id,
+
+            "pantry_id":
+                pantry_id,
+
+            "reason":
+                "food_not_safely_reroutable",
+        }
+
+    results = []
+
+    for driver_id in (
+        affected_driver_ids
+    ):
+
+        result = replan_in_transit(
+            operation_id=
+                operation_id,
+
+            driver_id=
+                driver_id,
+
+            reason=
+                "pantry_closed",
+
+            excluded_pantry_ids=[
+                pantry_id
+            ],
+        )
+
+        results.append(
+            result
+        )
+
+    if all(
+        result[
+            "status"
+        ]
+        ==
+        "in_transit_replanned"
+
+        for result in results
+    ):
+
+        return {
+            "status":
+                "in_transit_replanned",
+
+            "operation_id":
+                operation_id,
+
+            "pantry_id":
+                pantry_id,
+
+            "replans":
+                results,
+        }
+
+    return {
+        "status":
+            "requires_human_escalation",
+
+        "operation_id":
+            operation_id,
+
+        "pantry_id":
+            pantry_id,
+
+        "replans":
+            results,
+    }
 
 # =========================================================
 # EVENT HISTORY

@@ -749,8 +749,9 @@ def test_pantry_received_completes_final_delivery(
 # DELIVERY_FAILED test
 
 
-def test_delivery_failed_requires_in_transit_replan(
+def test_delivery_failed_automatically_calls_in_transit_replan(
     event_db,
+    monkeypatch,
 ):
     operation_id = (
         create_operation_from_plan(
@@ -762,7 +763,8 @@ def test_delivery_failed_requires_in_transit_replan(
         operation_id,
         "DRIVER_ACCEPTED",
         {
-            "driver_id": 1
+            "driver_id":
+                1
         },
     )
 
@@ -770,7 +772,8 @@ def test_delivery_failed_requires_in_transit_replan(
         operation_id,
         "PICKUP_COMPLETED",
         {
-            "driver_id": 1
+            "driver_id":
+                1
         },
     )
 
@@ -788,6 +791,35 @@ def test_delivery_failed_requires_in_transit_replan(
         ]
     )
 
+    def fake_in_transit_replan(
+        operation_id,
+        driver_id,
+        reason,
+        excluded_pantry_ids=None,
+    ):
+
+        assert operation_id is not None
+        assert driver_id == 1
+        assert reason == "delivery_failed"
+        assert excluded_pantry_ids == [1]
+
+        return {
+            "status":
+                "in_transit_replanned",
+
+            "operation_id":
+                operation_id,
+
+            "driver_id":
+                driver_id,
+        }
+
+    monkeypatch.setattr(
+        processor,
+        "replan_in_transit",
+        fake_in_transit_replan,
+    )
+
     result = (
         processor.process_event(
             operation_id,
@@ -803,40 +835,13 @@ def test_delivery_failed_requires_in_transit_replan(
     )
 
     assert (
-        result["result"][
+        result[
+            "result"
+        ][
             "status"
         ]
         ==
-        "requires_in_transit_replan"
-    )
-
-    operation = get_operation(
-        operation_id
-    )
-
-    assert (
-        operation["status"]
-        ==
-        "needs_replan"
-    )
-
-    assert (
-        operation[
-            "driver_routes"
-        ][0][
-            "stops"
-        ][0][
-            "status"
-        ]
-        ==
-        "failed"
-    )
-
-    # Food is still physically with James.
-    assert (
-        get_driver_status(1)
-        ==
-        "busy"
+        "in_transit_replanned"
     )
     
 # donation expired test 

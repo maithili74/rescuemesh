@@ -3128,6 +3128,1410 @@ def complete_operation(
         conn.close()
 
 
+def mark_delivery_by_driver(
+    operation_id,
+    stop_id,
+):
+    """
+    Driver reports that food was delivered.
+
+    This does NOT yet complete the stop.
+
+    The pantry must confirm receipt through
+    PANTRY_RECEIVED.
+    """
+
+    conn = get_connection()
+
+    try:
+        conn.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        row = conn.execute(
+            """
+            SELECT
+                s.id AS stop_id,
+                s.status AS stop_status,
+                s.quantity_lbs,
+                s.pantry_id,
+                r.id AS route_id,
+                r.driver_id,
+                r.status AS route_status,
+                r.operation_id,
+                o.status AS operation_status
+
+            FROM delivery_stops s
+
+            JOIN driver_routes r
+                ON r.id = s.route_id
+
+            JOIN operations o
+                ON o.id = r.operation_id
+
+            WHERE s.id = ?
+            """,
+            (
+                stop_id,
+            ),
+        ).fetchone()
+
+        if row is None:
+            raise ValueError(
+                f"Delivery stop {stop_id} "
+                f"does not exist."
+            )
+
+        if (
+            row["operation_id"]
+            !=
+            operation_id
+        ):
+            raise ValueError(
+                f"Delivery stop {stop_id} "
+                f"does not belong to "
+                f"operation {operation_id}."
+            )
+
+        if (
+            row["operation_status"]
+            !=
+            "active"
+        ):
+            raise ValueError(
+                f"Operation {operation_id} "
+                f"is not active."
+            )
+
+        # Driver should physically have the food first.
+        if (
+            row["route_status"]
+            !=
+            "picked_up"
+        ):
+            raise ValueError(
+                "Delivery cannot be completed "
+                "before pickup."
+            )
+
+        if (
+            row["stop_status"]
+            ==
+            "driver_delivered"
+        ):
+            raise ValueError(
+                f"Delivery stop {stop_id} "
+                f"was already marked delivered "
+                f"by the driver."
+            )
+
+        if (
+            row["stop_status"]
+            !=
+            "pending"
+        ):
+            raise ValueError(
+                f"Delivery stop {stop_id} "
+                f"cannot be delivered while "
+                f"status is "
+                f"{row['stop_status']}."
+            )
+
+        conn.execute(
+            """
+            UPDATE delivery_stops
+
+            SET status = 'driver_delivered'
+
+            WHERE id = ?
+            """,
+            (
+                stop_id,
+            ),
+        )
+
+        record_event(
+            operation_id,
+
+            "DELIVERY_COMPLETED",
+
+            {
+                "stop_id":
+                    stop_id,
+
+                "driver_id":
+                    row["driver_id"],
+
+                "pantry_id":
+                    row["pantry_id"],
+
+                "quantity_lbs":
+                    row["quantity_lbs"],
+            },
+
+            connection=conn,
+        )
+
+        conn.commit()
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        conn.close()
+
+    return {
+        "status":
+            "driver_delivered",
+
+        "operation_id":
+            operation_id,
+
+        "stop_id":
+            stop_id,
+
+        "pantry_id":
+            row["pantry_id"],
+
+        "quantity_lbs":
+            row["quantity_lbs"],
+    }
+    
+    
+    
+# pantry confirms receipt 
+
+def confirm_pantry_received(
+    operation_id,
+    stop_id,
+):
+    """
+    Pantry confirms that food was actually received.
+
+    driver_delivered
+            ↓
+        completed
+
+    If this was the final stop, complete the entire
+    operation.
+    """
+
+    conn = get_connection()
+
+    all_completed = False
+
+    try:
+        conn.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        row = conn.execute(
+            """
+            SELECT
+                s.id AS stop_id,
+                s.status AS stop_status,
+                s.quantity_lbs,
+                s.pantry_id,
+                r.driver_id,
+                r.operation_id,
+                o.status AS operation_status
+
+            FROM delivery_stops s
+
+            JOIN driver_routes r
+                ON r.id = s.route_id
+
+            JOIN operations o
+                ON o.id = r.operation_id
+
+            WHERE s.id = ?
+            """,
+            (
+                stop_id,
+            ),
+        ).fetchone()
+
+        if row is None:
+            raise ValueError(
+                f"Delivery stop {stop_id} "
+                f"does not exist."
+            )
+
+        if (
+            row["operation_id"]
+            !=
+            operation_id
+        ):
+            raise ValueError(
+                f"Delivery stop {stop_id} "
+                f"does not belong to "
+                f"operation {operation_id}."
+            )
+
+        if (
+            row["operation_status"]
+            !=
+            "active"
+        ):
+            raise ValueError(
+                f"Operation {operation_id} "
+                f"is not active."
+            )
+
+        if (
+            row["stop_status"]
+            ==
+            "completed"
+        ):
+            raise ValueError(
+                f"Pantry already confirmed "
+                f"delivery stop {stop_id}."
+            )
+
+        if (
+            row["stop_status"]
+            !=
+            "driver_delivered"
+        ):
+            raise ValueError(
+                "Pantry cannot confirm receipt "
+                "until the driver marks the "
+                "delivery as delivered."
+            )
+
+        conn.execute(
+            """
+            UPDATE delivery_stops
+
+            SET status = 'completed'
+
+            WHERE id = ?
+            """,
+            (
+                stop_id,
+            ),
+        )
+
+        record_event(
+            operation_id,
+
+            "PANTRY_RECEIVED",
+
+            {
+                "stop_id":
+                    stop_id,
+
+                "pantry_id":
+                    row["pantry_id"],
+
+                "driver_id":
+                    row["driver_id"],
+
+                "quantity_lbs":
+                    row["quantity_lbs"],
+            },
+
+            connection=conn,
+        )
+
+        remaining = conn.execute(
+            """
+            SELECT COUNT(*)
+
+            FROM delivery_stops s
+
+            JOIN driver_routes r
+                ON r.id = s.route_id
+
+            WHERE
+                r.operation_id = ?
+                AND
+                s.status != 'completed'
+            """,
+            (
+                operation_id,
+            ),
+        ).fetchone()[0]
+
+        all_completed = (
+            remaining == 0
+        )
+
+        conn.commit()
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        conn.close()
+
+    # complete_operation() has its own transaction.
+    if all_completed:
+        complete_operation(
+            operation_id
+        )
+
+    return {
+        "status":
+            "pantry_received",
+
+        "operation_id":
+            operation_id,
+
+        "stop_id":
+            stop_id,
+
+        "operation_completed":
+            all_completed,
+    }
+    
+
+#delivery failed
+
+def fail_delivery(
+    operation_id,
+    stop_id,
+    reason=None,
+):
+    """
+    Mark a delivery attempt as failed.
+
+    Because the food may already be physically in transit,
+    we do NOT restore pantry capacity, release the driver,
+    or pretend the food returned to the donor.
+
+    Instead we mark the operation as needing replanning.
+
+    A future in-transit replan will decide where the
+    undelivered food should go.
+    """
+
+    conn = get_connection()
+
+    try:
+        conn.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        row = conn.execute(
+            """
+            SELECT
+                s.id AS stop_id,
+                s.status AS stop_status,
+                s.quantity_lbs,
+                s.pantry_id,
+                r.driver_id,
+                r.status AS route_status,
+                r.operation_id,
+                o.status AS operation_status
+
+            FROM delivery_stops s
+
+            JOIN driver_routes r
+                ON r.id = s.route_id
+
+            JOIN operations o
+                ON o.id = r.operation_id
+
+            WHERE s.id = ?
+            """,
+            (
+                stop_id,
+            ),
+        ).fetchone()
+
+        if row is None:
+            raise ValueError(
+                f"Delivery stop {stop_id} "
+                f"does not exist."
+            )
+
+        if (
+            row["operation_id"]
+            !=
+            operation_id
+        ):
+            raise ValueError(
+                f"Delivery stop {stop_id} "
+                f"does not belong to "
+                f"operation {operation_id}."
+            )
+
+        if (
+            row["operation_status"]
+            !=
+            "active"
+        ):
+            raise ValueError(
+                f"Operation {operation_id} "
+                f"is not active."
+            )
+
+        if (
+            row["route_status"]
+            !=
+            "picked_up"
+        ):
+            raise ValueError(
+                "DELIVERY_FAILED requires the "
+                "food to have been picked up."
+            )
+
+        if (
+            row["stop_status"]
+            ==
+            "completed"
+        ):
+            raise ValueError(
+                "A completed delivery cannot "
+                "be marked failed."
+            )
+
+        conn.execute(
+            """
+            UPDATE delivery_stops
+
+            SET status = 'failed'
+
+            WHERE id = ?
+            """,
+            (
+                stop_id,
+            ),
+        )
+
+        conn.execute(
+            """
+            UPDATE operations
+
+            SET
+                status = 'needs_replan',
+                updated_at = CURRENT_TIMESTAMP
+
+            WHERE id = ?
+            """,
+            (
+                operation_id,
+            ),
+        )
+
+        record_event(
+            operation_id,
+
+            "DELIVERY_FAILED",
+
+            {
+                "stop_id":
+                    stop_id,
+
+                "driver_id":
+                    row["driver_id"],
+
+                "pantry_id":
+                    row["pantry_id"],
+
+                "quantity_lbs":
+                    row["quantity_lbs"],
+
+                "reason":
+                    reason,
+            },
+
+            connection=conn,
+        )
+
+        conn.commit()
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        conn.close()
+
+    return {
+        "status":
+            "requires_in_transit_replan",
+
+        "operation_id":
+            operation_id,
+
+        "stop_id":
+            stop_id,
+
+        "failed_quantity_lbs":
+            row["quantity_lbs"],
+
+        "reason":
+            reason,
+    }
+    
+    
+#pantry closed
+
+def close_pantry_and_replan(
+    operation_id,
+    pantry_id,
+):
+    """
+    Mark a pantry unavailable.
+
+    If the current operation does not use the pantry:
+        simply close it.
+
+    If the operation does use it:
+        before pickup -> safe full replan
+        after pickup  -> require in-transit replan
+    """
+
+    conn = get_connection()
+
+    donation_id = None
+    operation_was_active = False
+
+    try:
+        conn.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        operation = conn.execute(
+            """
+            SELECT *
+
+            FROM operations
+
+            WHERE id = ?
+            """,
+            (
+                operation_id,
+            ),
+        ).fetchone()
+
+        if operation is None:
+            raise ValueError(
+                f"Operation {operation_id} "
+                f"does not exist."
+            )
+
+        if (
+            operation["status"]
+            not in (
+                "planned",
+                "active",
+            )
+        ):
+            raise ValueError(
+                f"Operation {operation_id} "
+                f"cannot react to pantry closure "
+                f"while status is "
+                f"{operation['status']}."
+            )
+
+        donation_id = (
+            operation["donation_id"]
+        )
+
+        operation_was_active = (
+            operation["status"]
+            ==
+            "active"
+        )
+
+        pantry = conn.execute(
+            """
+            SELECT *
+
+            FROM pantries
+
+            WHERE id = ?
+            """,
+            (
+                pantry_id,
+            ),
+        ).fetchone()
+
+        if pantry is None:
+            raise ValueError(
+                f"Pantry {pantry_id} "
+                f"does not exist."
+            )
+
+        # Is this pantry actually part of this rescue?
+
+        affected_stop_count = (
+            conn.execute(
+                """
+                SELECT COUNT(*)
+
+                FROM delivery_stops s
+
+                JOIN driver_routes r
+                    ON r.id = s.route_id
+
+                WHERE
+                    r.operation_id = ?
+                    AND
+                    s.pantry_id = ?
+                    AND
+                    s.status NOT IN (
+                        'completed',
+                        'cancelled'
+                    )
+                """,
+                (
+                    operation_id,
+                    pantry_id,
+                ),
+            ).fetchone()[0]
+        )
+
+        # Close the pantry regardless.
+        conn.execute(
+            """
+            UPDATE pantries
+
+            SET status = 'unavailable'
+
+            WHERE id = ?
+            """,
+            (
+                pantry_id,
+            ),
+        )
+
+        record_event(
+            operation_id,
+
+            "PANTRY_CLOSED",
+
+            {
+                "pantry_id":
+                    pantry_id,
+
+                "affected_operation":
+                    affected_stop_count > 0,
+            },
+
+            connection=conn,
+        )
+
+        # =================================================
+        # OPERATION DOESN'T USE THIS PANTRY
+        # =================================================
+
+        if affected_stop_count == 0:
+
+            conn.commit()
+
+            return {
+                "status":
+                    "pantry_closed",
+
+                "operation_id":
+                    operation_id,
+
+                "pantry_id":
+                    pantry_id,
+
+                "replanned":
+                    False,
+            }
+
+        # =================================================
+        # SAFETY CHECK AFTER PICKUP
+        # =================================================
+
+        picked_up_count = (
+            conn.execute(
+                """
+                SELECT COUNT(*)
+
+                FROM driver_routes
+
+                WHERE
+                    operation_id = ?
+                    AND
+                    status = 'picked_up'
+                """,
+                (
+                    operation_id,
+                ),
+            ).fetchone()[0]
+        )
+
+        driver_delivered_count = (
+            conn.execute(
+                """
+                SELECT COUNT(*)
+
+                FROM delivery_stops s
+
+                JOIN driver_routes r
+                    ON r.id = s.route_id
+
+                WHERE
+                    r.operation_id = ?
+                    AND
+                    s.status IN (
+                        'driver_delivered',
+                        'completed'
+                    )
+                """,
+                (
+                    operation_id,
+                ),
+            ).fetchone()[0]
+        )
+
+        if (
+            picked_up_count > 0
+            or
+            driver_delivered_count > 0
+        ):
+
+            conn.execute(
+                """
+                UPDATE operations
+
+                SET
+                    status = 'needs_replan',
+                    updated_at = CURRENT_TIMESTAMP
+
+                WHERE id = ?
+                """,
+                (
+                    operation_id,
+                ),
+            )
+
+            record_event(
+                operation_id,
+
+                "IN_TRANSIT_REPLAN_REQUIRED",
+
+                {
+                    "reason":
+                        "pantry_closed",
+
+                    "pantry_id":
+                        pantry_id,
+                },
+
+                connection=conn,
+            )
+
+            conn.commit()
+
+            return {
+                "status":
+                    "requires_in_transit_replan",
+
+                "operation_id":
+                    operation_id,
+
+                "pantry_id":
+                    pantry_id,
+            }
+
+        # =================================================
+        # SAFE TO INVALIDATE OLD PLAN
+        # =================================================
+
+        if operation_was_active:
+
+            released = (
+                _release_resources_for_replan(
+                    conn,
+                    operation_id,
+                )
+            )
+
+            record_event(
+                operation_id,
+
+                "RESOURCES_RELEASED",
+
+                {
+                    "reason":
+                        "pantry_closed",
+
+                    "driver_ids":
+                        released[
+                            "driver_ids"
+                        ],
+
+                    "pantry_reservations":
+                        released[
+                            "pantry_reservations"
+                        ],
+                },
+
+                connection=conn,
+            )
+
+        else:
+            # PLANNED operation:
+            #
+            # Resources were never reserved, so DO NOT
+            # "restore" pantry capacity.
+
+            conn.execute(
+                """
+                UPDATE driver_routes
+
+                SET status = 'released'
+
+                WHERE operation_id = ?
+                """,
+                (
+                    operation_id,
+                ),
+            )
+
+            conn.execute(
+                """
+                UPDATE delivery_stops
+
+                SET status = 'cancelled'
+
+                WHERE route_id IN (
+                    SELECT id
+
+                    FROM driver_routes
+
+                    WHERE operation_id = ?
+                )
+                """,
+                (
+                    operation_id,
+                ),
+            )
+
+            conn.execute(
+                """
+                UPDATE operations
+
+                SET
+                    status = 'needs_replan',
+                    updated_at = CURRENT_TIMESTAMP
+
+                WHERE id = ?
+                """,
+                (
+                    operation_id,
+                ),
+            )
+
+            conn.execute(
+                """
+                UPDATE donations
+
+                SET status = 'available'
+
+                WHERE id = ?
+                """,
+                (
+                    donation_id,
+                ),
+            )
+
+        conn.commit()
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        conn.close()
+
+    # =====================================================
+    # REOPTIMIZE WITHOUT CLOSED PANTRY
+    # =====================================================
+
+    from app.optimizer.rescue_optimizer import (
+        optimize_rescue_plan,
+    )
+
+    new_plan = optimize_rescue_plan(
+        donation_id
+    )
+
+    if (
+        new_plan.get("status")
+        !=
+        "optimal"
+    ):
+
+        record_event(
+            operation_id,
+
+            "REPLAN_FAILED",
+
+            {
+                "reason":
+                    "pantry_closed",
+
+                "pantry_id":
+                    pantry_id,
+
+                "optimizer_status":
+                    new_plan.get(
+                        "status"
+                    ),
+            },
+        )
+
+        return {
+            "status":
+                "replan_failed",
+
+            "old_operation_id":
+                operation_id,
+
+            "plan":
+                new_plan,
+        }
+
+    new_operation_id = (
+        create_operation_from_plan(
+            new_plan
+        )
+    )
+
+    # Match the state of the operation being replaced.
+    #
+    # If drivers had already accepted and operation was
+    # active, activate the replacement like our existing
+    # replan behavior.
+    #
+    # If it was still planned, replacement stays planned.
+
+    if operation_was_active:
+        start_operation(
+            new_operation_id
+        )
+
+    update_operation_status(
+        operation_id,
+        "superseded",
+    )
+
+    record_event(
+        operation_id,
+
+        "REPLAN_CREATED",
+
+        {
+            "reason":
+                "pantry_closed",
+
+            "pantry_id":
+                pantry_id,
+
+            "replacement_operation_id":
+                new_operation_id,
+        },
+    )
+
+    record_event(
+        new_operation_id,
+
+        "REPLAN_FROM_OPERATION",
+
+        {
+            "previous_operation_id":
+                operation_id,
+
+            "reason":
+                "pantry_closed",
+
+            "pantry_id":
+                pantry_id,
+        },
+    )
+
+    return {
+        "status":
+            "replanned",
+
+        "old_operation_id":
+            operation_id,
+
+        "new_operation_id":
+            new_operation_id,
+
+        "new_plan":
+            new_plan,
+
+        "new_operation":
+            get_operation(
+                new_operation_id
+            ),
+    }
+    
+
+#donation expired
+
+def expire_donation(
+    donation_id,
+    operation_id=None,
+):
+    """
+    Expire a donation that can no longer be picked up.
+
+    Safe cases:
+
+        available donation
+        planned operation
+        active operation before pickup
+
+    Unsafe:
+
+        food already picked up
+    """
+
+    conn = get_connection()
+
+    try:
+        conn.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        donation = conn.execute(
+            """
+            SELECT *
+
+            FROM donations
+
+            WHERE id = ?
+            """,
+            (
+                donation_id,
+            ),
+        ).fetchone()
+
+        if donation is None:
+            raise ValueError(
+                f"Donation {donation_id} "
+                f"does not exist."
+            )
+
+        if (
+            donation["status"]
+            ==
+            "completed"
+        ):
+            raise ValueError(
+                "Completed donation cannot expire."
+            )
+
+        # If operation wasn't provided, find current one.
+
+        if operation_id is None:
+
+            row = conn.execute(
+                """
+                SELECT id
+
+                FROM operations
+
+                WHERE
+                    donation_id = ?
+                    AND
+                    status IN (
+                        'planned',
+                        'active'
+                    )
+
+                ORDER BY id DESC
+
+                LIMIT 1
+                """,
+                (
+                    donation_id,
+                ),
+            ).fetchone()
+
+            if row is not None:
+                operation_id = (
+                    row["id"]
+                )
+
+        # =================================================
+        # NO OPERATION EXISTS
+        # =================================================
+
+        if operation_id is None:
+
+            conn.execute(
+                """
+                UPDATE donations
+
+                SET status = 'expired'
+
+                WHERE id = ?
+                """,
+                (
+                    donation_id,
+                ),
+            )
+
+            conn.commit()
+
+            return {
+                "status":
+                    "expired",
+
+                "donation_id":
+                    donation_id,
+
+                "operation_id":
+                    None,
+            }
+
+        operation = conn.execute(
+            """
+            SELECT *
+
+            FROM operations
+
+            WHERE id = ?
+            """,
+            (
+                operation_id,
+            ),
+        ).fetchone()
+
+        if operation is None:
+            raise ValueError(
+                f"Operation {operation_id} "
+                f"does not exist."
+            )
+
+        if (
+            operation["donation_id"]
+            !=
+            donation_id
+        ):
+            raise ValueError(
+                f"Operation {operation_id} "
+                f"does not belong to "
+                f"donation {donation_id}."
+            )
+
+        # =================================================
+        # FOOD ALREADY PICKED UP?
+        # =================================================
+
+        picked_up_count = (
+            conn.execute(
+                """
+                SELECT COUNT(*)
+
+                FROM driver_routes
+
+                WHERE
+                    operation_id = ?
+                    AND
+                    status = 'picked_up'
+                """,
+                (
+                    operation_id,
+                ),
+            ).fetchone()[0]
+        )
+
+        delivered_count = (
+            conn.execute(
+                """
+                SELECT COUNT(*)
+
+                FROM delivery_stops s
+
+                JOIN driver_routes r
+                    ON r.id = s.route_id
+
+                WHERE
+                    r.operation_id = ?
+                    AND
+                    s.status IN (
+                        'driver_delivered',
+                        'completed'
+                    )
+                """,
+                (
+                    operation_id,
+                ),
+            ).fetchone()[0]
+        )
+
+        if (
+            picked_up_count > 0
+            or
+            delivered_count > 0
+        ):
+
+            raise ValueError(
+                "Donation cannot expire after food "
+                "has already been picked up."
+            )
+
+        # =================================================
+        # ACTIVE → RELEASE RESOURCES
+        # =================================================
+
+        if (
+            operation["status"]
+            ==
+            "active"
+        ):
+
+            released = (
+                _release_resources_for_replan(
+                    conn,
+                    operation_id,
+                )
+            )
+
+            record_event(
+                operation_id,
+
+                "RESOURCES_RELEASED",
+
+                {
+                    "reason":
+                        "donation_expired",
+
+                    "driver_ids":
+                        released[
+                            "driver_ids"
+                        ],
+
+                    "pantry_reservations":
+                        released[
+                            "pantry_reservations"
+                        ],
+                },
+
+                connection=conn,
+            )
+
+        # =================================================
+        # PLANNED → NOTHING WAS RESERVED
+        # =================================================
+
+        elif (
+            operation["status"]
+            ==
+            "planned"
+        ):
+
+            conn.execute(
+                """
+                UPDATE driver_routes
+
+                SET status = 'cancelled'
+
+                WHERE operation_id = ?
+                """,
+                (
+                    operation_id,
+                ),
+            )
+
+            conn.execute(
+                """
+                UPDATE delivery_stops
+
+                SET status = 'cancelled'
+
+                WHERE route_id IN (
+                    SELECT id
+
+                    FROM driver_routes
+
+                    WHERE operation_id = ?
+                )
+                """,
+                (
+                    operation_id,
+                ),
+            )
+
+        else:
+            raise ValueError(
+                f"Donation cannot expire while "
+                f"operation status is "
+                f"{operation['status']}."
+            )
+
+        # =================================================
+        # FINAL EXPIRED STATE
+        # =================================================
+
+        conn.execute(
+            """
+            UPDATE operations
+
+            SET
+                status = 'cancelled',
+                updated_at = CURRENT_TIMESTAMP
+
+            WHERE id = ?
+            """,
+            (
+                operation_id,
+            ),
+        )
+
+        conn.execute(
+            """
+            UPDATE donations
+
+            SET status = 'expired'
+
+            WHERE id = ?
+            """,
+            (
+                donation_id,
+            ),
+        )
+
+        record_event(
+            operation_id,
+
+            "DONATION_EXPIRED",
+
+            {
+                "donation_id":
+                    donation_id,
+            },
+
+            connection=conn,
+        )
+
+        conn.commit()
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        conn.close()
+
+    return {
+        "status":
+            "expired",
+
+        "donation_id":
+            donation_id,
+
+        "operation_id":
+            operation_id,
+    }        
+
 # =========================================================
 # EVENT HISTORY
 # =========================================================

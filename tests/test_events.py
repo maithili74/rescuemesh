@@ -549,12 +549,29 @@ def test_missing_driver_id_records_failure(
 # DELIVERY EVENT COMPLETES LAST STOP + OPERATION
 # =========================================================
 
-def test_delivery_completed_event_finishes_operation(
+def test_driver_delivery_waits_for_pantry_confirmation(
     event_db,
 ):
-
     operation_id = (
-        create_active_operation()
+        create_operation_from_plan(
+            original_plan()
+        )
+    )
+
+    processor.process_event(
+        operation_id,
+        "DRIVER_ACCEPTED",
+        {
+            "driver_id": 1
+        },
+    )
+
+    processor.process_event(
+        operation_id,
+        "PICKUP_COMPLETED",
+        {
+            "driver_id": 1
+        },
     )
 
     operation = get_operation(
@@ -574,20 +591,15 @@ def test_delivery_completed_event_finishes_operation(
     result = (
         processor.process_event(
             operation_id,
-
             "DELIVERY_COMPLETED",
-
             {
-                "stop_id":
-                    stop_id
+                "stop_id": stop_id
             },
         )
     )
 
     assert (
-        result[
-            "status"
-        ]
+        result["status"]
         ==
         "processed"
     )
@@ -597,9 +609,103 @@ def test_delivery_completed_event_finishes_operation(
     )
 
     assert (
+        operation["status"]
+        ==
+        "active"
+    )
+
+    assert (
         operation[
+            "driver_routes"
+        ][0][
+            "stops"
+        ][0][
             "status"
         ]
+        ==
+        "driver_delivered"
+    )
+
+    # Driver remains busy until pantry confirms.
+    assert (
+        get_driver_status(1)
+        ==
+        "busy"
+    )
+    
+    
+#pantry received test
+
+def test_pantry_received_completes_final_delivery(
+    event_db,
+):
+    operation_id = (
+        create_operation_from_plan(
+            original_plan()
+        )
+    )
+
+    processor.process_event(
+        operation_id,
+        "DRIVER_ACCEPTED",
+        {
+            "driver_id": 1
+        },
+    )
+
+    processor.process_event(
+        operation_id,
+        "PICKUP_COMPLETED",
+        {
+            "driver_id": 1
+        },
+    )
+
+    operation = get_operation(
+        operation_id
+    )
+
+    stop_id = (
+        operation[
+            "driver_routes"
+        ][0][
+            "stops"
+        ][0][
+            "id"
+        ]
+    )
+
+    processor.process_event(
+        operation_id,
+        "DELIVERY_COMPLETED",
+        {
+            "stop_id": stop_id
+        },
+    )
+
+    result = (
+        processor.process_event(
+            operation_id,
+            "PANTRY_RECEIVED",
+            {
+                "stop_id": stop_id
+            },
+        )
+    )
+
+    assert (
+        result["result"][
+            "operation_completed"
+        ]
+        is True
+    )
+
+    operation = get_operation(
+        operation_id
+    )
+
+    assert (
+        operation["status"]
         ==
         "completed"
     )
@@ -623,9 +729,7 @@ def test_delivery_completed_event_finishes_operation(
     )
 
     event_types = [
-        event[
-            "event_type"
-        ]
+        event["event_type"]
 
         for event in operation[
             "events"
@@ -633,7 +737,7 @@ def test_delivery_completed_event_finishes_operation(
     ]
 
     assert (
-        "DELIVERY_COMPLETED"
+        "PANTRY_RECEIVED"
         in event_types
     )
 
@@ -641,12 +745,257 @@ def test_delivery_completed_event_finishes_operation(
         "OPERATION_COMPLETED"
         in event_types
     )
+    
+# DELIVERY_FAILED test
 
-    assert (
-        "EVENT_PROCESSED"
-        in event_types
+
+def test_delivery_failed_requires_in_transit_replan(
+    event_db,
+):
+    operation_id = (
+        create_operation_from_plan(
+            original_plan()
+        )
     )
 
+    processor.process_event(
+        operation_id,
+        "DRIVER_ACCEPTED",
+        {
+            "driver_id": 1
+        },
+    )
+
+    processor.process_event(
+        operation_id,
+        "PICKUP_COMPLETED",
+        {
+            "driver_id": 1
+        },
+    )
+
+    operation = get_operation(
+        operation_id
+    )
+
+    stop_id = (
+        operation[
+            "driver_routes"
+        ][0][
+            "stops"
+        ][0][
+            "id"
+        ]
+    )
+
+    result = (
+        processor.process_event(
+            operation_id,
+            "DELIVERY_FAILED",
+            {
+                "stop_id":
+                    stop_id,
+
+                "reason":
+                    "pantry unable to receive food",
+            },
+        )
+    )
+
+    assert (
+        result["result"][
+            "status"
+        ]
+        ==
+        "requires_in_transit_replan"
+    )
+
+    operation = get_operation(
+        operation_id
+    )
+
+    assert (
+        operation["status"]
+        ==
+        "needs_replan"
+    )
+
+    assert (
+        operation[
+            "driver_routes"
+        ][0][
+            "stops"
+        ][0][
+            "status"
+        ]
+        ==
+        "failed"
+    )
+
+    # Food is still physically with James.
+    assert (
+        get_driver_status(1)
+        ==
+        "busy"
+    )
+    
+# donation expired test 
+
+
+def test_planned_donation_can_expire(
+    event_db,
+):
+    operation_id = (
+        create_operation_from_plan(
+            original_plan()
+        )
+    )
+
+    result = (
+        processor.process_event(
+            operation_id,
+            "DONATION_EXPIRED",
+            {
+                "donation_id": 1
+            },
+        )
+    )
+
+    assert (
+        result["result"][
+            "status"
+        ]
+        ==
+        "expired"
+    )
+
+    operation = get_operation(
+        operation_id
+    )
+
+    assert (
+        operation["status"]
+        ==
+        "cancelled"
+    )
+
+    conn = db.get_connection()
+
+    try:
+        donation = conn.execute(
+            """
+            SELECT status
+
+            FROM donations
+
+            WHERE id = 1
+            """
+        ).fetchone()
+
+    finally:
+        conn.close()
+
+    assert (
+        donation["status"]
+        ==
+        "expired"
+    )
+
+    # Driver never became busy.
+    assert (
+        get_driver_status(1)
+        ==
+        "available"
+    )
+    
+# pantry closed test 
+
+def test_pantry_closed_marks_pantry_unavailable(
+    event_db,
+    monkeypatch,
+):
+    operation_id = (
+        create_operation_from_plan(
+            original_plan()
+        )
+    )
+
+    processor.process_event(
+        operation_id,
+        "DRIVER_ACCEPTED",
+        {
+            "driver_id": 1
+        },
+    )
+
+    monkeypatch.setattr(
+        optimizer,
+        "optimize_rescue_plan",
+        lambda donation_id: {
+            "status":
+                "no_compatible_pantry",
+
+            "donation_id":
+                donation_id,
+        },
+    )
+
+    result = (
+        processor.process_event(
+            operation_id,
+            "PANTRY_CLOSED",
+            {
+                "pantry_id": 1
+            },
+        )
+    )
+
+    assert (
+        result["result"][
+            "status"
+        ]
+        ==
+        "replan_failed"
+    )
+
+    conn = db.get_connection()
+
+    try:
+        pantry = conn.execute(
+            """
+            SELECT status
+
+            FROM pantries
+
+            WHERE id = 1
+            """
+        ).fetchone()
+
+    finally:
+        conn.close()
+
+    assert (
+        pantry["status"]
+        ==
+        "unavailable"
+    )
+
+    operation = get_operation(
+        operation_id
+    )
+
+    assert (
+        operation["status"]
+        ==
+        "needs_replan"
+    )
+
+    # James was released because pickup had not occurred.
+    assert (
+        get_driver_status(1)
+        ==
+        "available"
+    )
 
 # =========================================================
 # TEST 5

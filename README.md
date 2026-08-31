@@ -10,9 +10,8 @@
 6. Optimizer committed
 7. Operations/state tables - done
 8. Execute/save an optimized plan - done 
-
-9. Event system
-10. Driver cancellation + automatic re-plan
+9. Event system - done
+10. Driver cancellation + automatic re-plan - done way before
 11. Human escalation
 12. Strands agent + tools
 13. Streamlit dashboard

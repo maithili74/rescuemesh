@@ -21,6 +21,8 @@ from app.operations.execution import (
     mark_delivery_by_driver,
     plan_new_donation,
     record_event,
+    replan_closed_pantry_in_transit,
+    replan_in_transit,
 )
 
 # =========================================================
@@ -122,10 +124,32 @@ def _handle_pantry_closed(
         "pantry_id",
     )
 
-    return close_pantry_and_replan(
+    result = close_pantry_and_replan(
         operation_id,
         pantry_id,
     )
+
+    # Existing function handles pre-pickup replanning.
+    #
+    # If it detects that food is already in transit,
+    # continue with the new remaining-state optimizer.
+
+    if (
+        result.get(
+            "status"
+        )
+        ==
+        "requires_in_transit_replan"
+    ):
+
+        return (
+            replan_closed_pantry_in_transit(
+                operation_id,
+                pantry_id,
+            )
+        )
+
+    return result
 
 
 # =========================================================
@@ -145,12 +169,44 @@ def _handle_delivery_failed(
         "reason"
     )
 
-    return fail_delivery(
+    failure = fail_delivery(
         operation_id,
         stop_id,
         reason,
     )
 
+    # =====================================================
+    # AUTOMATIC RECOVERY
+    # =====================================================
+
+    if (
+        failure[
+            "status"
+        ]
+        ==
+        "requires_in_transit_replan"
+    ):
+
+        return replan_in_transit(
+            operation_id=
+                operation_id,
+
+            driver_id=
+                failure[
+                    "driver_id"
+                ],
+
+            reason=
+                "delivery_failed",
+
+            excluded_pantry_ids=[
+                failure[
+                    "pantry_id"
+                ]
+            ],
+        )
+
+    return failure
 
 # =========================================================
 # DONATION EXPIRED

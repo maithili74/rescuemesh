@@ -1319,6 +1319,32 @@ def change_pantry_capacity_and_replan(
                 "been completed. Remaining-state "
                 "replanning is required."
             )
+            
+            
+        picked_up_count = conn.execute(
+            """
+            SELECT COUNT(*)
+
+            FROM driver_routes
+
+            WHERE
+                operation_id = ?
+                AND
+                status = 'picked_up'
+            """,
+            (
+                operation_id,
+            ),
+        ).fetchone()[0]
+
+        if picked_up_count > 0:
+
+            raise ValueError(
+                "Automatic full replanning is not "
+                "allowed after food has already been "
+                "picked up. In-transit replanning is "
+                "required."
+            )            
 
         # =================================================
         # LOAD PANTRY
@@ -1808,6 +1834,624 @@ def change_pantry_capacity_and_replan(
     }
 
 
+def plan_new_donation(
+    donation_id,
+):
+    """
+    React to a newly-created donation.
+
+    Flow:
+
+        donation exists
+            ↓
+        optimize
+            ↓
+        save planned operation
+            ↓
+        drivers receive assignments
+
+    IMPORTANT:
+    This does NOT start the operation.
+
+    Drivers must accept their assignments first.
+    """
+
+    conn = get_connection()
+
+    try:
+
+        donation = conn.execute(
+            """
+            SELECT *
+
+            FROM donations
+
+            WHERE id = ?
+            """,
+            (
+                donation_id,
+            ),
+        ).fetchone()
+
+        if donation is None:
+
+            raise ValueError(
+                f"Donation {donation_id} "
+                f"does not exist."
+            )
+
+        if (
+            donation["status"]
+            !=
+            "available"
+        ):
+
+            raise ValueError(
+                f"Donation {donation_id} "
+                f"is not available for planning. "
+                f"Current status: "
+                f"{donation['status']}"
+            )
+
+        # Prevent duplicate operations for the same
+        # donation.
+
+        existing_operation = (
+            conn.execute(
+                """
+                SELECT id, status
+
+                FROM operations
+
+                WHERE
+                    donation_id = ?
+                    AND
+                    status IN (
+                        'planned',
+                        'active',
+                        'needs_replan'
+                    )
+
+                LIMIT 1
+                """,
+                (
+                    donation_id,
+                ),
+            ).fetchone()
+        )
+
+        if existing_operation:
+
+            raise ValueError(
+                f"Donation {donation_id} "
+                f"already has operation "
+                f"{existing_operation['id']} "
+                f"with status "
+                f"{existing_operation['status']}."
+            )
+
+    finally:
+
+        conn.close()
+
+    # =====================================================
+    # OPTIMIZE
+    # =====================================================
+
+    from app.optimizer.rescue_optimizer import (
+        optimize_rescue_plan,
+    )
+
+    plan = optimize_rescue_plan(
+        donation_id
+    )
+
+    if (
+        plan.get("status")
+        !=
+        "optimal"
+    ):
+
+        return {
+            "status":
+                "planning_failed",
+
+            "donation_id":
+                donation_id,
+
+            "plan":
+                plan,
+        }
+
+    # =====================================================
+    # SAVE PLANNED OPERATION
+    # =====================================================
+
+    operation_id = (
+        create_operation_from_plan(
+            plan
+        )
+    )
+
+    conn = get_connection()
+
+    try:
+
+        conn.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        conn.execute(
+            """
+            UPDATE donations
+
+            SET status = 'planned'
+
+            WHERE id = ?
+            """,
+            (
+                donation_id,
+            ),
+        )
+
+        record_event(
+            operation_id,
+
+            "DONATION_CREATED",
+
+            {
+                "donation_id":
+                    donation_id,
+
+                "drivers_assigned":
+                    plan["drivers_used"],
+
+                "rescued_lbs":
+                    plan["rescued_lbs"],
+            },
+
+            connection=conn,
+        )
+
+        conn.commit()
+
+    except Exception:
+
+        conn.rollback()
+        raise
+
+    finally:
+
+        conn.close()
+
+    return {
+        "status":
+            "planned",
+
+        "donation_id":
+            donation_id,
+
+        "operation_id":
+            operation_id,
+
+        "plan":
+            plan,
+
+        "operation":
+            get_operation(
+                operation_id
+            ),
+    }
+    
+    
+def accept_driver_assignment(
+    operation_id,
+    driver_id,
+):
+    """
+    Accept one driver's assignment.
+
+    If every driver assigned to the operation has accepted,
+    automatically activate the operation and reserve
+    resources.
+    """
+
+    conn = get_connection()
+
+    all_accepted = False
+    remaining_drivers = 0
+
+    try:
+
+        conn.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        # =================================================
+        # CHECK OPERATION
+        # =================================================
+
+        operation = conn.execute(
+            """
+            SELECT *
+
+            FROM operations
+
+            WHERE id = ?
+            """,
+            (
+                operation_id,
+            ),
+        ).fetchone()
+
+        if operation is None:
+
+            raise ValueError(
+                f"Operation {operation_id} "
+                f"does not exist."
+            )
+
+        if (
+            operation["status"]
+            !=
+            "planned"
+        ):
+
+            raise ValueError(
+                f"Operation {operation_id} "
+                f"is not waiting for driver acceptance. "
+                f"Current status: "
+                f"{operation['status']}."
+            )
+
+        # =================================================
+        # FIND DRIVER ROUTE
+        # =================================================
+
+        route = conn.execute(
+            """
+            SELECT *
+
+            FROM driver_routes
+
+            WHERE
+                operation_id = ?
+                AND
+                driver_id = ?
+            """,
+            (
+                operation_id,
+                driver_id,
+            ),
+        ).fetchone()
+
+        if route is None:
+
+            raise ValueError(
+                f"Driver {driver_id} "
+                f"is not assigned to "
+                f"operation {operation_id}."
+            )
+
+        if (
+            route["status"]
+            ==
+            "accepted"
+        ):
+
+            raise ValueError(
+                f"Driver {driver_id} "
+                f"already accepted this assignment."
+            )
+
+        if (
+            route["status"]
+            !=
+            "assigned"
+        ):
+
+            raise ValueError(
+                f"Driver {driver_id} "
+                f"cannot accept a route with "
+                f"status {route['status']}."
+            )
+
+        # =================================================
+        # ACCEPT ROUTE
+        # =================================================
+
+        conn.execute(
+            """
+            UPDATE driver_routes
+
+            SET status = 'accepted'
+
+            WHERE id = ?
+            """,
+            (
+                route["id"],
+            ),
+        )
+
+        record_event(
+            operation_id,
+
+            "DRIVER_ACCEPTED",
+
+            {
+                "driver_id":
+                    driver_id,
+
+                "route_id":
+                    route["id"],
+            },
+
+            connection=conn,
+        )
+
+        # =================================================
+        # CHECK IF EVERY DRIVER ACCEPTED
+        # =================================================
+
+        remaining_drivers = (
+            conn.execute(
+                """
+                SELECT COUNT(*)
+
+                FROM driver_routes
+
+                WHERE
+                    operation_id = ?
+                    AND
+                    status != 'accepted'
+                """,
+                (
+                    operation_id,
+                ),
+            ).fetchone()[0]
+        )
+
+        all_accepted = (
+            remaining_drivers
+            ==
+            0
+        )
+
+        conn.commit()
+
+    except Exception:
+
+        conn.rollback()
+        raise
+
+    finally:
+
+        conn.close()
+
+    # =====================================================
+    # START ONLY AFTER EVERY DRIVER ACCEPTS
+    # =====================================================
+
+    if all_accepted:
+
+        operation = start_operation(
+            operation_id
+        )
+
+        return {
+            "status":
+                "operation_started",
+
+            "operation_id":
+                operation_id,
+
+            "driver_id":
+                driver_id,
+
+            "all_drivers_accepted":
+                True,
+
+            "remaining_drivers":
+                0,
+
+            "operation":
+                operation,
+        }
+
+    return {
+        "status":
+            "accepted_waiting",
+
+        "operation_id":
+            operation_id,
+
+        "driver_id":
+            driver_id,
+
+        "all_drivers_accepted":
+            False,
+
+        "remaining_drivers":
+            remaining_drivers,
+    }
+    
+
+def complete_pickup(
+    operation_id,
+    driver_id,
+):
+    """
+    Mark a driver's pickup as completed.
+
+    The food is now physically with this driver.
+    """
+
+    conn = get_connection()
+
+    try:
+
+        conn.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        # =================================================
+        # CHECK OPERATION
+        # =================================================
+
+        operation = conn.execute(
+            """
+            SELECT *
+
+            FROM operations
+
+            WHERE id = ?
+            """,
+            (
+                operation_id,
+            ),
+        ).fetchone()
+
+        if operation is None:
+
+            raise ValueError(
+                f"Operation {operation_id} "
+                f"does not exist."
+            )
+
+        if (
+            operation["status"]
+            !=
+            "active"
+        ):
+
+            raise ValueError(
+                f"Operation {operation_id} "
+                f"is not active."
+            )
+
+        # =================================================
+        # FIND DRIVER ROUTE
+        # =================================================
+
+        route = conn.execute(
+            """
+            SELECT *
+
+            FROM driver_routes
+
+            WHERE
+                operation_id = ?
+                AND
+                driver_id = ?
+            """,
+            (
+                operation_id,
+                driver_id,
+            ),
+        ).fetchone()
+
+        if route is None:
+
+            raise ValueError(
+                f"Driver {driver_id} "
+                f"is not assigned to "
+                f"operation {operation_id}."
+            )
+
+        if (
+            route["status"]
+            ==
+            "picked_up"
+        ):
+
+            raise ValueError(
+                f"Driver {driver_id} "
+                f"already completed pickup."
+            )
+
+        if (
+            route["status"]
+            !=
+            "active"
+        ):
+
+            raise ValueError(
+                f"Driver {driver_id} "
+                f"cannot complete pickup "
+                f"while route status is "
+                f"{route['status']}."
+            )
+
+        # =================================================
+        # PICKUP COMPLETED
+        # =================================================
+
+        conn.execute(
+            """
+            UPDATE driver_routes
+
+            SET status = 'picked_up'
+
+            WHERE id = ?
+            """,
+            (
+                route["id"],
+            ),
+        )
+
+        record_event(
+            operation_id,
+
+            "PICKUP_COMPLETED",
+
+            {
+                "driver_id":
+                    driver_id,
+
+                "route_id":
+                    route["id"],
+
+                "assigned_lbs":
+                    route[
+                        "assigned_lbs"
+                    ],
+            },
+
+            connection=conn,
+        )
+
+        conn.commit()
+
+    except Exception:
+
+        conn.rollback()
+        raise
+
+    finally:
+
+        conn.close()
+
+    return {
+        "status":
+            "pickup_completed",
+
+        "operation_id":
+            operation_id,
+
+        "driver_id":
+            driver_id,
+
+        "route_id":
+            route["id"],
+
+        "assigned_lbs":
+            route[
+                "assigned_lbs"
+            ],
+    }        
+    
+    
+
 def cancel_driver_and_replan(
     operation_id,
     driver_id,
@@ -1938,6 +2582,32 @@ def cancel_driver_and_replan(
                 "donation_id"
             ]
         )
+
+        picked_up_count = conn.execute(
+            """
+            SELECT COUNT(*)
+
+            FROM driver_routes
+
+            WHERE
+                operation_id = ?
+                AND
+                status = 'picked_up'
+            """,
+            (
+                operation_id,
+            ),
+        ).fetchone()[0]
+
+        if picked_up_count > 0:
+
+            raise ValueError(
+                "Automatic full replanning is not "
+                "allowed after food has already been "
+                "picked up. In-transit replanning is "
+                "required."
+            )        
+
 
         # =================================================
         # RECORD CANCELLATION

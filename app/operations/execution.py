@@ -2946,12 +2946,17 @@ def complete_operation(
     """
     Complete an active rescue operation.
 
-    All pantry delivery stops must already be completed.
+    Rules:
 
-    Drivers are released back to available.
-
-    Pantry capacity is NOT restored because the food
-    was actually delivered.
+    - Every ACTIVE delivery stop must be finished.
+    - Historical cancelled / failed_released stops do not
+      block completion.
+    - Drivers are released back to available.
+    - Pantry capacity is NOT restored because completed
+      deliveries actually consumed that capacity.
+    - If some food was intentionally left unresolved after
+      a human-approved partial rescue, the operation ends
+      as 'completed_partial'.
     """
 
     conn = get_connection()
@@ -2962,10 +2967,16 @@ def complete_operation(
             "BEGIN IMMEDIATE"
         )
 
+        # =================================================
+        # LOAD OPERATION
+        # =================================================
+
         operation = conn.execute(
             """
             SELECT *
+
             FROM operations
+
             WHERE id = ?
             """,
             (
@@ -2980,7 +2991,11 @@ def complete_operation(
                 f"does not exist."
             )
 
-        if operation["status"] != "active":
+        if (
+            operation["status"]
+            !=
+            "active"
+        ):
 
             raise ValueError(
                 f"Operation {operation_id} "
@@ -2988,34 +3003,101 @@ def complete_operation(
             )
 
         # =================================================
-        # CHECK ALL DELIVERIES
+        # CHECK ACTIVE DELIVERIES
+        # =================================================
+        #
+        # These statuses mean there is still physical work
+        # that has not been fully resolved:
+        #
+        # pending
+        #     Driver has not delivered yet.
+        #
+        # driver_delivered
+        #     Driver says delivered, but pantry has not
+        #     confirmed receipt.
+        #
+        # failed
+        #     Delivery failed and has not yet been released
+        #     or replanned.
+        #
+        # Historical states such as:
+        #
+        # completed
+        # cancelled
+        # failed_released
+        #
+        # should NOT block final completion.
         # =================================================
 
-        pending_count = conn.execute(
-            """
-            SELECT COUNT(*)
+        unfinished_count = (
+            conn.execute(
+                """
+                SELECT COUNT(*)
 
-            FROM delivery_stops s
+                FROM delivery_stops s
 
-            JOIN driver_routes r
-                ON r.id = s.route_id
+                JOIN driver_routes r
+                    ON r.id = s.route_id
 
-            WHERE
-                r.operation_id = ?
-                AND
-                s.status != 'completed'
-            """,
-            (
-                operation_id,
-            ),
-        ).fetchone()[0]
+                WHERE
+                    r.operation_id = ?
+                    AND
+                    s.status IN (
+                        'pending',
+                        'driver_delivered',
+                        'failed'
+                    )
+                """,
+                (
+                    operation_id,
+                ),
+            ).fetchone()[0]
+        )
 
-        if pending_count > 0:
+        if unfinished_count > 0:
 
             raise ValueError(
                 "Operation cannot be completed "
-                "because delivery stops are "
-                "still pending."
+                "because delivery stops are still "
+                "unresolved."
+            )
+
+        # =================================================
+        # DETERMINE FINAL RESULT
+        # =================================================
+        #
+        # Normal operation:
+        #
+        # unrescued_lbs == 0
+        #     → completed
+        #
+        # Human-approved partial recovery:
+        #
+        # unrescued_lbs > 0
+        #     → completed_partial
+        # =================================================
+
+        unrescued_lbs = float(
+            operation[
+                "unrescued_lbs"
+            ]
+            or 0.0
+        )
+
+        if (
+            unrescued_lbs
+            >
+            0.01
+        ):
+
+            final_status = (
+                "completed_partial"
+            )
+
+        else:
+
+            final_status = (
+                "completed"
             )
 
         # =================================================
@@ -3073,12 +3155,13 @@ def complete_operation(
             UPDATE operations
 
             SET
-                status = 'completed',
+                status = ?,
                 updated_at = CURRENT_TIMESTAMP
 
             WHERE id = ?
             """,
             (
+                final_status,
                 operation_id,
             ),
         )
@@ -3091,16 +3174,22 @@ def complete_operation(
             """
             UPDATE donations
 
-            SET status = 'completed'
+            SET status = ?
 
             WHERE id = ?
             """,
             (
+                final_status,
+
                 operation[
                     "donation_id"
                 ],
             ),
         )
+
+        # =================================================
+        # AUDIT EVENT
+        # =================================================
 
         record_event(
             operation_id,
@@ -3108,6 +3197,17 @@ def complete_operation(
             "OPERATION_COMPLETED",
 
             {
+                "final_status":
+                    final_status,
+
+                "rescued_lbs":
+                    operation[
+                        "rescued_lbs"
+                    ],
+
+                "unrescued_lbs":
+                    unrescued_lbs,
+
                 "drivers_released":
                     driver_ids,
             },
@@ -3116,6 +3216,25 @@ def complete_operation(
         )
 
         conn.commit()
+
+        return {
+            "status":
+                final_status,
+
+            "operation_id":
+                operation_id,
+
+            "rescued_lbs":
+                operation[
+                    "rescued_lbs"
+                ],
+
+            "unrescued_lbs":
+                unrescued_lbs,
+
+            "drivers_released":
+                driver_ids,
+        }
 
     except Exception:
 
@@ -5336,6 +5455,244 @@ def _apply_in_transit_plan(
     )
 
 
+def _create_in_transit_escalation(
+    operation_id,
+    driver_id,
+    reason,
+    state,
+    plan,
+):
+    """
+    Human involvement is used ONLY when full safe
+    autonomous recovery is impossible.
+    """
+
+    from app.escalation.manager import (
+        create_escalation,
+    )
+
+    plan_status = plan.get(
+        "status"
+    )
+
+    # =====================================================
+    # CASE 1:
+    # PARTIAL RESCUE IS FEASIBLE
+    #
+    # Human decides whether rescuing the feasible amount
+    # is worth proceeding while manually handling the
+    # unresolved remainder.
+    # =====================================================
+
+    if (
+        plan_status
+        ==
+        "partial_only"
+        and
+        plan.get(
+            "rescued_lbs",
+            0,
+        )
+        >
+        0
+        and
+        plan.get(
+            "stops"
+        )
+    ):
+
+        options = [
+            {
+                "id":
+                    "proceed_partial",
+
+                "action":
+                    "approve_partial_replan",
+
+                "label":
+                    "Proceed with feasible rescue",
+
+                "description":
+                    (
+                        f"Deliver "
+                        f"{plan['rescued_lbs']} lb "
+                        f"using the verified route and "
+                        f"manually handle the remaining "
+                        f"{plan['unrescued_lbs']} lb."
+                    ),
+
+                "rescued_lbs":
+                    plan[
+                        "rescued_lbs"
+                    ],
+
+                "manual_remainder_lbs":
+                    plan[
+                        "unrescued_lbs"
+                    ],
+            },
+
+            {
+                "id":
+                    "manual_takeover",
+
+                "action":
+                    "manual_takeover",
+
+                "label":
+                    "Take over remaining coordination",
+
+                "description":
+                    (
+                        "Pause RescueMesh automation "
+                        "and let an operations coordinator "
+                        "handle the remaining food."
+                    ),
+            },
+        ]
+
+        recommended_action = (
+            "proceed_partial"
+        )
+
+        escalation_type = (
+            "partial_in_transit_rescue"
+        )
+
+        escalation_reason = (
+            "RescueMesh found a safe route for only "
+            "part of the food still in transit."
+        )
+
+    # =====================================================
+    # CASE 2:
+    # NO SAFE EXECUTABLE PLAN EXISTS
+    #
+    # We MUST NOT invent one.
+    # =====================================================
+
+    else:
+
+        options = [
+            {
+                "id":
+                    "manual_takeover",
+
+                "action":
+                    "manual_takeover",
+
+                "label":
+                    "Take over remaining coordination",
+
+                "description":
+                    (
+                        "No complete safe automated "
+                        "recovery is available. "
+                        "Pause automation for manual "
+                        "coordination."
+                    ),
+            }
+        ]
+
+        recommended_action = (
+            "manual_takeover"
+        )
+
+        if (
+            plan_status
+            ==
+            "no_feasible_pantry"
+        ):
+
+            escalation_type = (
+                "no_feasible_destination"
+            )
+
+            escalation_reason = (
+                "No compatible available pantry "
+                "can safely receive the remaining food."
+            )
+
+        elif (
+            plan_status
+            ==
+            "route_infeasible"
+        ):
+
+            escalation_type = (
+                "no_feasible_route"
+            )
+
+            escalation_reason = (
+                "A compatible destination may exist, "
+                "but no route can be completed safely "
+                "within the driver's remaining shift."
+            )
+
+        elif (
+            plan_status
+            ==
+            "routing_error"
+        ):
+
+            escalation_type = (
+                "routing_failure"
+            )
+
+            escalation_reason = (
+                "Routing could not be verified, "
+                "so RescueMesh will not execute "
+                "an unverified route."
+            )
+
+        else:
+
+            escalation_type = (
+                "in_transit_recovery_failed"
+            )
+
+            escalation_reason = (
+                "RescueMesh could not construct "
+                "a complete safe autonomous recovery."
+            )
+
+    return create_escalation(
+        operation_id=
+            operation_id,
+
+        escalation_type=
+            escalation_type,
+
+        reason=
+            escalation_reason,
+
+        context={
+            "trigger_reason":
+                reason,
+
+            "driver_id":
+                driver_id,
+
+            # Store the exact world snapshot on which
+            # the decision was based.
+            "state":
+                state,
+
+            # Store the exact deterministic optimizer
+            # result shown to the human.
+            "plan":
+                plan,
+        },
+
+        options=
+            options,
+
+        recommended_action=
+            recommended_action,
+    )
+
+
+
 # =========================================================
 # PUBLIC IN-TRANSIT REPLAN
 # =========================================================
@@ -5415,9 +5772,36 @@ def replan_in_transit(
                 },
             )
 
+            failed_plan = {
+                "status":
+                    "replacement_plan_apply_failed",
+
+                "reason":
+                    str(error),
+            }
+
+            escalation = (
+                _create_in_transit_escalation(
+                    operation_id=
+                        operation_id,
+
+                    driver_id=
+                        driver_id,
+
+                    reason=
+                        reason,
+
+                    state=
+                        state,
+
+                    plan=
+                        failed_plan,
+                )
+            )
+
             return {
                 "status":
-                    "requires_human_escalation",
+                    "awaiting_human",
 
                 "operation_id":
                     operation_id,
@@ -5430,14 +5814,8 @@ def replan_in_transit(
                         "remaining_lbs"
                     ],
 
-                "reason":
-                    "replacement_plan_could_not_be_applied",
-
-                "error":
-                    str(error),
-
-                "plan":
-                    plan,
+                "escalation":
+                    escalation,
             }
 
         return {
@@ -5463,7 +5841,7 @@ def replan_in_transit(
         }
 
     # =====================================================
-    # AUTONOMOUS RECOVERY NOT GOOD ENOUGH
+    # FULL SAFE AUTONOMOUS RECOVERY WAS NOT POSSIBLE
     # =====================================================
 
     record_event(
@@ -5500,9 +5878,28 @@ def replan_in_transit(
         },
     )
 
+    escalation = (
+        _create_in_transit_escalation(
+            operation_id=
+                operation_id,
+
+            driver_id=
+                driver_id,
+
+            reason=
+                reason,
+
+            state=
+                state,
+
+            plan=
+                plan,
+        )
+    )
+
     return {
         "status":
-            "requires_human_escalation",
+            "awaiting_human",
 
         "operation_id":
             operation_id,
@@ -5515,12 +5912,12 @@ def replan_in_transit(
                 "remaining_lbs"
             ],
 
-        "reason":
-            "no_safe_full_remaining_plan",
-
         "plan":
             plan,
-    }
+
+        "escalation":
+            escalation,
+    }            
 
 
 # =========================================================

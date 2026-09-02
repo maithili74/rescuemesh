@@ -748,42 +748,12 @@ def optimize_in_transit_route(
         2,
     )
 
-    # =====================================================
-    # IMPORTANT SAFETY RULE
+        # =====================================================
+    # BUILD A REAL FEASIBLE ROUTE FIRST
     #
-    # If we cannot rescue ALL of the remaining food,
-    # do not silently execute a partial plan.
-    #
-    # That becomes a human-escalation decision.
-    # =====================================================
-
-    if (
-        rescued_lbs
-        <
-        remaining_lbs
-        -
-        0.01
-    ):
-
-        return {
-            "status":
-                "partial_only",
-
-            "remaining_lbs":
-                remaining_lbs,
-
-            "rescued_lbs":
-                rescued_lbs,
-
-            "unrescued_lbs":
-                unrescued_lbs,
-
-            "assignments":
-                assignments,
-        }
-
-    # =====================================================
-    # FIND NEW STOP ORDER
+    # Even if only part of the remaining food can be
+    # rescued, we must verify that the proposed route is
+    # actually feasible before showing it to a human.
     # =====================================================
 
     route = _find_best_route(
@@ -817,6 +787,78 @@ def optimize_in_transit_route(
             "unrescued_lbs":
                 unrescued_lbs,
         }
+
+    # =====================================================
+    # PARTIAL RESCUE
+    #
+    # We found a valid route, but it cannot rescue all
+    # remaining food.
+    #
+    # Do NOT execute automatically.
+    # This becomes a human-escalation decision.
+    # =====================================================
+
+    if (
+        rescued_lbs
+        <
+        remaining_lbs
+        -
+        0.01
+    ):
+
+        return {
+            "status":
+                "partial_only",
+
+            "operation_id":
+                state[
+                    "operation_id"
+                ],
+
+            "route_id":
+                state[
+                    "route_id"
+                ],
+
+            "driver_id":
+                state[
+                    "driver_id"
+                ],
+
+            "remaining_lbs":
+                remaining_lbs,
+
+            "rescued_lbs":
+                rescued_lbs,
+
+            "unrescued_lbs":
+                unrescued_lbs,
+
+            "assignments":
+                assignments,
+
+            "stops":
+                route[
+                    "stops"
+                ],
+
+            "route_complete":
+                route[
+                    "route_complete"
+                ],
+
+            "remaining_distance_miles":
+                route[
+                    "remaining_distance_miles"
+                ],
+        }
+
+    # =====================================================
+    # FULL SAFE RECOVERY
+    #
+    # Every remaining pound can be safely rerouted.
+    # RescueMesh can execute this automatically.
+    # =====================================================
 
     return {
         "status":

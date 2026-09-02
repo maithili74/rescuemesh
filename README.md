@@ -12,7 +12,7 @@
 8. Execute/save an optimized plan - done 
 9. Event system - done
 10. Driver cancellation + automatic re-plan - done way before
-11. Human escalation
+11. Human escalation - 5 more cases left
 12. Strands agent + tools
 13. Streamlit dashboard
 14. Benchmark

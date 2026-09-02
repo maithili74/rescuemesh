@@ -12,7 +12,9 @@ from app.operations.execution import (
     replan_in_transit,
     start_operation,
 )
-
+from app.escalation.manager import (
+    approve_escalation,
+)
 
 # =========================================================
 # TEST DATABASE
@@ -735,11 +737,10 @@ def test_in_transit_replan_releases_only_unused_capacity(
 # PARTIAL RECOVERY SHOULD NOT SILENTLY EXECUTE
 # =========================================================
 
-def test_partial_in_transit_plan_requires_human_escalation(
+def test_partial_in_transit_plan_creates_human_escalation(
     in_transit_db,
     monkeypatch,
 ):
-
     operation_id = (
         activate_and_pick_up()
     )
@@ -752,6 +753,17 @@ def test_partial_in_transit_plan_requires_human_escalation(
             "status":
                 "partial_only",
 
+            "operation_id":
+                operation_id,
+
+            "route_id":
+                state[
+                    "route_id"
+                ],
+
+            "driver_id":
+                1,
+
             "remaining_lbs":
                 state[
                     "remaining_lbs"
@@ -762,6 +774,41 @@ def test_partial_in_transit_plan_requires_human_escalation(
 
             "unrescued_lbs":
                 80.0,
+
+            "assignments": [
+                {
+                    "pantry_id":
+                        3,
+
+                    "pantry_name":
+                        "Community Care",
+
+                    "quantity_lbs":
+                        120.0,
+                }
+            ],
+
+            "stops": [
+                {
+                    "pantry_id":
+                        3,
+
+                    "pantry_name":
+                        "Community Care",
+
+                    "quantity_lbs":
+                        120.0,
+
+                    "arrival_time":
+                        "12:00",
+                }
+            ],
+
+            "route_complete":
+                "12:05",
+
+            "remaining_distance_miles":
+                4.0,
         },
     )
 
@@ -776,13 +823,56 @@ def test_partial_in_transit_plan_requires_human_escalation(
             "delivery_failed",
     )
 
+    # =====================================================
+    # AUTO RECOVERY COULD NOT SAVE EVERYTHING
+    # SO THE OPERATION SHOULD NOW WAIT FOR A HUMAN
+    # =====================================================
+
     assert (
         result[
             "status"
         ]
         ==
-        "requires_human_escalation"
+        "awaiting_human"
     )
+
+    # =====================================================
+    # A REAL ESCALATION RECORD SHOULD EXIST
+    # =====================================================
+
+    escalation = (
+        result[
+            "escalation"
+        ]
+    )
+
+    assert (
+        escalation[
+            "status"
+        ]
+        ==
+        "pending"
+    )
+
+    assert (
+        escalation[
+            "escalation_type"
+        ]
+        ==
+        "partial_in_transit_rescue"
+    )
+
+    assert (
+        escalation[
+            "recommended_action"
+        ]
+        ==
+        "proceed_partial"
+    )
+
+    # =====================================================
+    # THE PARTIAL PLAN SHOULD STILL BE PRESERVED
+    # =====================================================
 
     assert (
         result[
@@ -804,6 +894,34 @@ def test_partial_in_transit_plan_requires_human_escalation(
         80
     )
 
+    assert (
+        len(
+            result[
+                "plan"
+            ][
+                "stops"
+            ]
+        )
+        ==
+        1
+    )
+
+    assert (
+        result[
+            "plan"
+        ][
+            "stops"
+        ][0][
+            "pantry_id"
+        ]
+        ==
+        3
+    )
+
+    # =====================================================
+    # OPERATION SHOULD BE PAUSED FOR HUMAN DECISION
+    # =====================================================
+
     operation = get_operation(
         operation_id
     )
@@ -813,5 +931,376 @@ def test_partial_in_transit_plan_requires_human_escalation(
             "status"
         ]
         ==
-        "needs_replan"
+        "awaiting_human"
+    )
+    
+def test_full_safe_replan_does_not_create_human_escalation(
+    in_transit_db,
+    monkeypatch,
+):
+    operation_id = (
+        activate_and_pick_up()
+    )
+
+    monkeypatch.setattr(
+        in_transit_optimizer,
+        "optimize_in_transit_route",
+
+        lambda state: {
+            "status":
+                "optimal",
+
+            "assignments": [
+                {
+                    "pantry_id":
+                        3,
+
+                    "pantry_name":
+                        "Community Care",
+
+                    "quantity_lbs":
+                        200.0,
+                }
+            ],
+
+            "stops": [
+                {
+                    "pantry_id":
+                        3,
+
+                    "pantry_name":
+                        "Community Care",
+
+                    "quantity_lbs":
+                        200.0,
+
+                    "arrival_time":
+                        "12:00",
+                }
+            ],
+
+            "route_complete":
+                "12:05",
+
+            "remaining_distance_miles":
+                4.0,
+        },
+    )
+
+    result = replan_in_transit(
+        operation_id=
+            operation_id,
+
+        driver_id=
+            1,
+
+        reason=
+            "pantry_closed",
+    )
+
+    assert (
+        result[
+            "status"
+        ]
+        ==
+        "in_transit_replanned"
+    )
+
+    conn = db.get_connection()
+
+    try:
+        count = conn.execute(
+            """
+            SELECT COUNT(*)
+
+            FROM escalations
+
+            WHERE operation_id = ?
+            """,
+            (
+                operation_id,
+            ),
+        ).fetchone()[0]
+
+    finally:
+        conn.close()
+
+    # THE MOST IMPORTANT HUMAN-ESCALATION RULE:
+    #
+    # If RescueMesh can safely fix the problem itself,
+    # a human must never be bothered.
+
+    assert count == 0
+    
+def test_partial_replan_creates_real_human_escalation(
+    in_transit_db,
+    monkeypatch,
+):
+    operation_id = (
+        activate_and_pick_up()
+    )
+
+    monkeypatch.setattr(
+        in_transit_optimizer,
+        "optimize_in_transit_route",
+
+        lambda state: {
+            "status":
+                "partial_only",
+
+            "operation_id":
+                operation_id,
+
+            "route_id":
+                state[
+                    "route_id"
+                ],
+
+            "driver_id":
+                1,
+
+            "remaining_lbs":
+                200.0,
+
+            "rescued_lbs":
+                120.0,
+
+            "unrescued_lbs":
+                80.0,
+
+            "assignments": [
+                {
+                    "pantry_id":
+                        3,
+
+                    "pantry_name":
+                        "Community Care",
+
+                    "quantity_lbs":
+                        120.0,
+                }
+            ],
+
+            "stops": [
+                {
+                    "pantry_id":
+                        3,
+
+                    "pantry_name":
+                        "Community Care",
+
+                    "quantity_lbs":
+                        120.0,
+
+                    "arrival_time":
+                        "12:00",
+                }
+            ],
+
+            "route_complete":
+                "12:05",
+
+            "remaining_distance_miles":
+                4.0,
+        },
+    )
+
+    result = replan_in_transit(
+        operation_id=
+            operation_id,
+
+        driver_id=
+            1,
+
+        reason=
+            "delivery_failed",
+    )
+
+    assert (
+        result[
+            "status"
+        ]
+        ==
+        "awaiting_human"
+    )
+
+    escalation = (
+        result[
+            "escalation"
+        ]
+    )
+
+    assert (
+        escalation[
+            "status"
+        ]
+        ==
+        "pending"
+    )
+
+    assert (
+        escalation[
+            "escalation_type"
+        ]
+        ==
+        "partial_in_transit_rescue"
+    )
+
+    assert (
+        escalation[
+            "recommended_action"
+        ]
+        ==
+        "proceed_partial"
+    )
+
+    operation = get_operation(
+        operation_id
+    )
+
+    assert (
+        operation[
+            "status"
+        ]
+        ==
+        "awaiting_human"
+    )
+    
+def test_human_can_approve_partial_rescue(
+    in_transit_db,
+    monkeypatch,
+):
+    operation_id = (
+        activate_and_pick_up()
+    )
+
+    monkeypatch.setattr(
+        in_transit_optimizer,
+        "optimize_in_transit_route",
+
+        lambda state: {
+            "status":
+                "partial_only",
+
+            "operation_id":
+                operation_id,
+
+            "route_id":
+                state[
+                    "route_id"
+                ],
+
+            "driver_id":
+                1,
+
+            "remaining_lbs":
+                200.0,
+
+            "rescued_lbs":
+                120.0,
+
+            "unrescued_lbs":
+                80.0,
+
+            "assignments": [
+                {
+                    "pantry_id":
+                        3,
+
+                    "pantry_name":
+                        "Community Care",
+
+                    "quantity_lbs":
+                        120.0,
+                }
+            ],
+
+            "stops": [
+                {
+                    "pantry_id":
+                        3,
+
+                    "pantry_name":
+                        "Community Care",
+
+                    "quantity_lbs":
+                        120.0,
+
+                    "arrival_time":
+                        "12:00",
+                }
+            ],
+
+            "route_complete":
+                "12:05",
+
+            "remaining_distance_miles":
+                4.0,
+        },
+    )
+
+    result = replan_in_transit(
+        operation_id=
+            operation_id,
+
+        driver_id=
+            1,
+
+        reason=
+            "delivery_failed",
+    )
+
+    escalation_id = (
+        result[
+            "escalation"
+        ][
+            "id"
+        ]
+    )
+
+    resolved = approve_escalation(
+        escalation_id=
+            escalation_id,
+
+        option_id=
+            "proceed_partial",
+
+        notes=
+            "Proceed with the feasible rescue.",
+    )
+
+    assert (
+        resolved[
+            "status"
+        ]
+        ==
+        "approved"
+    )
+
+    assert (
+        resolved[
+            "decision"
+        ]
+        ==
+        "proceed_partial"
+    )
+
+    operation = get_operation(
+        operation_id
+    )
+
+    assert (
+        operation[
+            "status"
+        ]
+        ==
+        "active"
+    )
+
+    assert (
+        operation[
+            "unrescued_lbs"
+        ]
+        ==
+        80
     )

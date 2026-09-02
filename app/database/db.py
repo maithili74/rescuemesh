@@ -132,6 +132,48 @@ def create_tables():
         """
     )
     
+    cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS escalations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+                operation_id INTEGER NOT NULL,
+
+                escalation_type TEXT NOT NULL,
+
+                reason TEXT NOT NULL,
+
+                status TEXT NOT NULL DEFAULT 'pending',
+
+                recommended_action TEXT,
+
+                options_json TEXT,
+
+                context_json TEXT,
+
+                decision TEXT,
+
+                decision_notes TEXT,
+
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+                resolved_at TEXT,
+
+                FOREIGN KEY (operation_id)
+                    REFERENCES operations(id)
+                    ON DELETE CASCADE
+            );
+            """
+        )
+    
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_escalations_operation_status
+        ON escalations(operation_id, status);
+        """
+    )
+        
+    
     cursor.executescript(
         """
         CREATE TABLE IF NOT EXISTS operations (

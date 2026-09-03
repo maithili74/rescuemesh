@@ -14,8 +14,11 @@ from app.operations.execution import (
 )
 from app.escalation.manager import (
     approve_escalation,
+    create_escalation,
+    get_escalation,
+    get_pending_escalations,
+    reject_escalation,
 )
-
 # =========================================================
 # TEST DATABASE
 # =========================================================
@@ -1303,4 +1306,489 @@ def test_human_can_approve_partial_rescue(
         ]
         ==
         80
+    )
+    
+# duplicate pending escalation is prevented
+    
+def test_duplicate_pending_escalation_is_prevented(
+    in_transit_db,
+):
+    operation_id = (
+        activate_and_pick_up()
+    )
+
+    first = create_escalation(
+        operation_id=
+            operation_id,
+
+        escalation_type=
+            "driver_failure_after_pickup",
+
+        reason=
+            "Driver cannot continue after pickup.",
+
+        context={
+            "driver_id":
+                1,
+
+            "remaining_lbs":
+                200.0,
+        },
+
+        options=[
+            {
+                "id":
+                    "manual_takeover",
+
+                "action":
+                    "manual_takeover",
+
+                "label":
+                    "Take over manually",
+            }
+        ],
+
+        recommended_action=
+            "manual_takeover",
+    )
+
+    second = create_escalation(
+        operation_id=
+            operation_id,
+
+        escalation_type=
+            "driver_failure_after_pickup",
+
+        reason=
+            "Driver cannot continue after pickup.",
+
+        context={
+            "driver_id":
+                1,
+
+            "remaining_lbs":
+                200.0,
+        },
+
+        options=[
+            {
+                "id":
+                    "manual_takeover",
+
+                "action":
+                    "manual_takeover",
+
+                "label":
+                    "Take over manually",
+            }
+        ],
+
+        recommended_action=
+            "manual_takeover",
+    )
+
+    # RescueMesh should return the already-existing
+    # pending escalation instead of creating another one.
+
+    assert (
+        first[
+            "id"
+        ]
+        ==
+        second[
+            "id"
+        ]
+    )
+
+    pending = (
+        get_pending_escalations(
+            operation_id
+        )
+    )
+
+    assert len(
+        pending
+    ) == 1
+
+    assert (
+        pending[0][
+            "escalation_type"
+        ]
+        ==
+        "driver_failure_after_pickup"
+    )
+    
+# invalid human option is rejected
+
+def test_invalid_human_option_is_rejected(
+    in_transit_db,
+):
+    operation_id = (
+        activate_and_pick_up()
+    )
+
+    escalation = create_escalation(
+        operation_id=
+            operation_id,
+
+        escalation_type=
+            "no_feasible_destination",
+
+        reason=
+            "No safe destination exists.",
+
+        context={
+            "driver_id":
+                1,
+
+            "remaining_lbs":
+                200.0,
+        },
+
+        options=[
+            {
+                "id":
+                    "manual_takeover",
+
+                "action":
+                    "manual_takeover",
+
+                "label":
+                    "Take over manually",
+            }
+        ],
+
+        recommended_action=
+            "manual_takeover",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="not valid",
+    ):
+
+        approve_escalation(
+            escalation_id=
+                escalation[
+                    "id"
+                ],
+
+            option_id=
+                "invent_a_new_route",
+        )
+
+    # Invalid decision must NOT change the escalation.
+
+    stored = get_escalation(
+        escalation[
+            "id"
+        ]
+    )
+
+    assert (
+        stored[
+            "status"
+        ]
+        ==
+        "pending"
+    )
+
+    operation = get_operation(
+        operation_id
+    )
+
+    assert (
+        operation[
+            "status"
+        ]
+        ==
+        "awaiting_human"
+    )
+    
+# same escalation cannot be approved twice 
+
+def test_escalation_cannot_be_approved_twice(
+    in_transit_db,
+):
+    operation_id = (
+        activate_and_pick_up()
+    )
+
+    escalation = create_escalation(
+        operation_id=
+            operation_id,
+
+        escalation_type=
+            "driver_failure_after_pickup",
+
+        reason=
+            "Driver cannot continue safely.",
+
+        context={
+            "driver_id":
+                1,
+
+            "remaining_lbs":
+                200.0,
+        },
+
+        options=[
+            {
+                "id":
+                    "manual_takeover",
+
+                "action":
+                    "manual_takeover",
+
+                "label":
+                    "Take over manually",
+            }
+        ],
+
+        recommended_action=
+            "manual_takeover",
+    )
+
+    # First approval should work.
+
+    first_result = (
+        approve_escalation(
+            escalation_id=
+                escalation[
+                    "id"
+                ],
+
+            option_id=
+                "manual_takeover",
+
+            notes=
+                "Operations coordinator will handle it.",
+        )
+    )
+
+    assert (
+        first_result[
+            "status"
+        ]
+        ==
+        "approved"
+    )
+
+    # Second approval must be blocked.
+
+    with pytest.raises(
+        ValueError,
+        match="Only a pending escalation can be approved",
+    ):
+
+        approve_escalation(
+            escalation_id=
+                escalation[
+                    "id"
+                ],
+
+            option_id=
+                "manual_takeover",
+        )
+
+    stored = get_escalation(
+        escalation[
+            "id"
+        ]
+    )
+
+    assert (
+        stored[
+            "status"
+        ]
+        ==
+        "approved"
+    )
+    
+# rejection moves operation to manual resolution
+
+def test_rejected_escalation_moves_operation_to_manual_resolution(
+    in_transit_db,
+):
+    operation_id = (
+        activate_and_pick_up()
+    )
+
+    escalation = create_escalation(
+        operation_id=
+            operation_id,
+
+        escalation_type=
+            "partial_in_transit_rescue",
+
+        reason=
+            "Only part of the remaining food "
+            "can be safely rescued.",
+
+        context={
+            "driver_id":
+                1,
+
+            "remaining_lbs":
+                200.0,
+        },
+
+        options=[
+            {
+                "id":
+                    "manual_takeover",
+
+                "action":
+                    "manual_takeover",
+
+                "label":
+                    "Take over manually",
+            }
+        ],
+
+        recommended_action=
+            "manual_takeover",
+    )
+
+    result = reject_escalation(
+        escalation_id=
+            escalation[
+                "id"
+            ],
+
+        notes=
+            "Coordinator rejected the suggested action.",
+    )
+
+    assert (
+        result[
+            "status"
+        ]
+        ==
+        "rejected"
+    )
+
+    assert (
+        result[
+            "decision"
+        ]
+        ==
+        "rejected"
+    )
+
+    operation = get_operation(
+        operation_id
+    )
+
+    assert (
+        operation[
+            "status"
+        ]
+        ==
+        "manual_resolution"
+    )
+    
+# completed operation cannot create escalation
+
+def test_completed_operation_cannot_create_escalation(
+    in_transit_db,
+):
+    operation_id = (
+        activate_and_pick_up()
+    )
+
+    operation = get_operation(
+        operation_id
+    )
+
+    stops = (
+        operation[
+            "driver_routes"
+        ][0][
+            "stops"
+        ]
+    )
+
+    # Complete every delivery normally.
+    #
+    # Driver confirms delivery first,
+    # pantry then confirms receipt.
+
+    for stop in stops:
+
+        mark_delivery_by_driver(
+            operation_id,
+            stop[
+                "id"
+            ],
+        )
+
+        confirm_pantry_received(
+            operation_id,
+            stop[
+                "id"
+            ],
+        )
+
+    operation = get_operation(
+        operation_id
+    )
+
+    assert (
+        operation[
+            "status"
+        ]
+        ==
+        "completed"
+    )
+
+    # A completed rescue is terminal.
+    # Creating an escalation must be forbidden.
+
+    with pytest.raises(
+        ValueError,
+        match="terminal operation",
+    ):
+
+        create_escalation(
+            operation_id=
+                operation_id,
+
+            escalation_type=
+                "fake_late_problem",
+
+            reason=
+                "This should never be created.",
+
+            context={},
+
+            options=[
+                {
+                    "id":
+                        "manual_takeover",
+
+                    "action":
+                        "manual_takeover",
+
+                    "label":
+                        "Take over manually",
+                }
+            ],
+
+            recommended_action=
+                "manual_takeover",
+        )
+
+    pending = (
+        get_pending_escalations(
+            operation_id
+        )
+    )
+
+    assert (
+        len(
+            pending
+        )
+        ==
+        0
     )

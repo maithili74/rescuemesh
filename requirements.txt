@@ -3,3 +3,4 @@ python-dotenv
 pytest
 requests
 ortools
+strands-agents>=1.0.0

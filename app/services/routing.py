@@ -1,5 +1,5 @@
 import os
-
+import time
 import requests
 from dotenv import load_dotenv
 
@@ -73,12 +73,25 @@ def get_route_matrix(locations):
     Get real road distances and travel times between
     multiple coordinates using openrouteservice Matrix API.
 
-    locations format:
+    Accepted location formats:
+
     [
         (latitude, longitude),
         (latitude, longitude),
+    ]
+
+    or:
+
+    [
+        {
+            "latitude": 36.1627,
+            "longitude": -86.7816,
+        },
         ...
     ]
+
+    ORS expects coordinates in:
+        [longitude, latitude]
     """
 
     if not ORS_API_KEY:
@@ -93,26 +106,116 @@ def get_route_matrix(locations):
         "Content-Type": "application/json",
     }
 
-    # ORS expects longitude first, then latitude.
-    coordinates = [
-        [longitude, latitude]
-        for latitude, longitude in locations
-    ]
+    coordinates = []
+
+    for location in locations:
+
+        # ---------------------------------------------
+        # Dictionary format
+        # ---------------------------------------------
+        if isinstance(location, dict):
+
+            latitude = location.get("latitude")
+            longitude = location.get("longitude")
+
+        # ---------------------------------------------
+        # Tuple/list format
+        # ---------------------------------------------
+        elif (
+            isinstance(location, (tuple, list))
+            and len(location) == 2
+        ):
+
+            latitude = location[0]
+            longitude = location[1]
+
+        else:
+
+            raise ValueError(
+                f"Invalid location format: {location}"
+            )
+
+        if latitude is None or longitude is None:
+
+            raise ValueError(
+                f"Location is missing latitude or longitude: "
+                f"{location}"
+            )
+
+        try:
+            latitude = float(latitude)
+            longitude = float(longitude)
+
+        except (TypeError, ValueError):
+
+            raise ValueError(
+                f"Invalid latitude/longitude values: "
+                f"{location}"
+            )
+
+        # ORS requires longitude FIRST.
+        coordinates.append(
+            [
+                longitude,
+                latitude,
+            ]
+        )
+
+    if len(coordinates) < 2:
+        raise ValueError(
+            "Route matrix requires at least two locations."
+        )
 
     payload = {
         "locations": coordinates,
-        "metrics": ["distance", "duration"],
+        "metrics": [
+            "distance",
+            "duration",
+        ],
         "units": "mi",
     }
 
-    response = requests.post(
-        url,
-        json=payload,
-        headers=headers,
-        timeout=30,
-    )
+    max_attempts = 3
 
-    response.raise_for_status()
+    for attempt in range(1, max_attempts + 1):
+
+        try:
+            response = requests.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=30,
+            )
+
+            # Do not retry invalid requests.
+            if 400 <= response.status_code < 500:
+                response.raise_for_status()
+
+            # Retry temporary ORS/server failures.
+            if response.status_code >= 500:
+
+                if attempt == max_attempts:
+                    response.raise_for_status()
+
+                time.sleep(attempt)
+                continue
+
+            response.raise_for_status()
+            break
+
+        except requests.exceptions.Timeout:
+
+            if attempt == max_attempts:
+                raise
+
+            time.sleep(attempt)
+
+        except requests.exceptions.ConnectionError:
+
+            if attempt == max_attempts:
+                raise
+
+            time.sleep(attempt)
 
     data = response.json()
 
@@ -122,19 +225,29 @@ def get_route_matrix(locations):
     durations_minutes = []
 
     for row in durations_seconds:
+
         converted_row = []
 
         for value in row:
+
             if value is None:
                 converted_row.append(None)
-            else:
-                converted_row.append(value / 60)
 
-        durations_minutes.append(converted_row)
+            else:
+                converted_row.append(
+                    value / 60
+                )
+
+        durations_minutes.append(
+            converted_row
+        )
 
     return {
-        "distances_miles": distances,
-        "durations_minutes": durations_minutes,
+        "distances_miles":
+            distances,
+
+        "durations_minutes":
+            durations_minutes,
     }
     
 if __name__ == "__main__":

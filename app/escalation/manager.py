@@ -482,6 +482,28 @@ def approve_escalation(
                     unrescued_lbs =
                         unrescued_lbs + ?,
 
+                    rescue_rate =
+                        CASE
+                            WHEN
+                                (
+                                    rescued_lbs
+                                    +
+                                    unrescued_lbs
+                                ) > 0
+                            THEN
+                                MAX(
+                                    0,
+                                    rescued_lbs - ?
+                                )
+                                /
+                                (
+                                    rescued_lbs
+                                    +
+                                    unrescued_lbs
+                                )
+                            ELSE 0
+                        END,
+
                     status = 'active',
 
                     updated_at =
@@ -490,6 +512,7 @@ def approve_escalation(
                 WHERE id = ?
                 """,
                 (
+                    newly_unrescued_lbs,
                     newly_unrescued_lbs,
                     newly_unrescued_lbs,
                     operation_id,

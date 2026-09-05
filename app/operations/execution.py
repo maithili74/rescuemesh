@@ -1311,14 +1311,6 @@ def change_pantry_capacity_and_replan(
             ),
         ).fetchone()[0]
 
-        if completed_count > 0:
-
-            raise ValueError(
-                "Automatic full replanning is not "
-                "allowed after a delivery has already "
-                "been completed. Remaining-state "
-                "replanning is required."
-            )
             
             
         picked_up_count = conn.execute(
@@ -1336,15 +1328,7 @@ def change_pantry_capacity_and_replan(
                 operation_id,
             ),
         ).fetchone()[0]
-
-        if picked_up_count > 0:
-
-            raise ValueError(
-                "Automatic full replanning is not "
-                "allowed after food has already been "
-                "picked up. In-transit replanning is "
-                "required."
-            )            
+            
 
         # =================================================
         # LOAD PANTRY
@@ -1526,6 +1510,40 @@ def change_pantry_capacity_and_replan(
         # CURRENT PLAN NO LONGER FITS
         # =================================================
 
+        # =================================================
+        # SAFETY:
+        # FULL REPLAN IS NOT ALLOWED AFTER PHYSICAL
+        # EXECUTION HAS STARTED
+        # =================================================
+        #
+        # We only apply this restriction if the capacity
+        # change actually breaks the current operation.
+        #
+        # A capacity update to an unrelated pantry is safe
+        # even if another route has already been picked up.
+        # =================================================
+
+        if completed_count > 0:
+
+            raise ValueError(
+                "Automatic full replanning is not "
+                "allowed after a delivery has already "
+                "been completed. Remaining-state "
+                "replanning is required."
+            )
+
+
+        if picked_up_count > 0:
+
+            raise ValueError(
+                "Automatic full replanning is not "
+                "allowed after food has already been "
+                "picked up. In-transit replanning is "
+                "required."
+            )
+        
+        
+        
         needs_replan = True
 
         # First release the WHOLE old plan using the old
@@ -3566,7 +3584,11 @@ def confirm_pantry_received(
             WHERE
                 r.operation_id = ?
                 AND
-                s.status != 'completed'
+                s.status IN (
+                    'pending',
+                    'driver_delivered',
+                    'failed'
+                )
             """,
             (
                 operation_id,

@@ -13,7 +13,7 @@
 9. Event system - done
 10. Driver cancellation + automatic re-plan - done way before
 11. Human escalation - 5 more cases left
-12. Strands agent + tools
+12. Strands agent + tools  - done till here
 13. Streamlit dashboard
 14. Benchmark
 15. AWS Bedrock/AgentCore if credits arrive

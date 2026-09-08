@@ -4,3 +4,4 @@ pytest
 requests
 ortools
 strands-agents>=1.0.0
+streamlit>=1.39.0

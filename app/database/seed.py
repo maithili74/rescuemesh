@@ -3,32 +3,43 @@ from app.database.db import get_connection, create_tables
 
 def clear_existing_data(conn):
     """
-    Clear existing seed data and reset SQLite auto-increment IDs
-    so our seeded IDs always start from 1.
+    Clear RescueMesh data in foreign-key-safe order
+    and reset auto-increment IDs so seeded foreign-key
+    references remain deterministic.
     """
+
     cursor = conn.cursor()
 
-    cursor.execute("DELETE FROM pantry_needs")
-    cursor.execute("DELETE FROM donations")
-    cursor.execute("DELETE FROM drivers")
-    cursor.execute("DELETE FROM pantries")
-    cursor.execute("DELETE FROM donors")
+    tables = [
+        "events",
+        "escalations",
+        "delivery_stops",
+        "driver_routes",
+        "operations",
+        "donations",
+        "pantry_needs",
+        "pantries",
+        "drivers",
+        "donors",
+    ]
 
-    # Reset AUTOINCREMENT counters
-    cursor.execute(
-        """
-        DELETE FROM sqlite_sequence
-        WHERE name IN (
-            'pantry_needs',
-            'donations',
-            'drivers',
-            'pantries',
-            'donors'
+    for table in tables:
+        cursor.execute(
+            f"DELETE FROM {table}"
         )
-        """
-    )
 
-    conn.commit()
+    # Reset AUTOINCREMENT counters.
+    #
+    # The seed data relies on deterministic IDs such as:
+    # donor_id = 1, pantry_id = 1, etc.
+    try:
+        cursor.execute(
+            "DELETE FROM sqlite_sequence"
+        )
+    except Exception:
+        # sqlite_sequence may not exist if no table
+        # uses AUTOINCREMENT.
+        pass
 
 
 # =========================================================

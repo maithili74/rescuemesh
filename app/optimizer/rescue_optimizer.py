@@ -158,6 +158,77 @@ def build_network_matrix(
     }
 
 
+def driver_has_scheduling_conflict(
+    driver_id,
+    proposed_pickup_start,
+):
+    """
+    Return True if the driver already has a planned or
+    active RescueMesh route that has not finished before
+    the proposed pickup time.
+
+    Planned routes count as real commitments even though
+    the driver's general status may still be 'available'.
+    """
+
+    from app.database.db import get_connection
+
+    conn = get_connection()
+
+    try:
+        rows = conn.execute(
+            """
+            SELECT
+                r.pickup_start,
+                r.route_complete,
+                r.status AS route_status,
+                o.status AS operation_status
+
+            FROM driver_routes r
+
+            JOIN operations o
+                ON o.id = r.operation_id
+
+            WHERE
+                r.driver_id = ?
+                AND
+                o.status IN (
+                    'planned',
+                    'active',
+                    'awaiting_human'
+                )
+            """,
+            (
+                driver_id,
+            ),
+        ).fetchall()
+
+    finally:
+        conn.close()
+
+    for row in rows:
+
+        if not row["route_complete"]:
+            continue
+
+        existing_route_complete = (
+            time_to_minutes(
+                row["route_complete"]
+            )
+        )
+
+        # Driver is still committed when the new pickup
+        # would begin.
+        if (
+            existing_route_complete
+            >
+            proposed_pickup_start
+        ):
+            return True
+
+    return False
+
+
 # =========================================================
 # FILTER DRIVERS USING REAL TRAVEL TIME
 # =========================================================
@@ -243,6 +314,24 @@ def get_pickup_feasible_drivers(
             +
             PICKUP_SERVICE_MINUTES
         )
+
+        # -----------------------------------------------------
+        # EXISTING DRIVER COMMITMENTS
+        # -----------------------------------------------------
+        #
+        # A driver may still have status='available' while
+        # already assigned to another planned rescue.
+        #
+        # Do not double-book that driver if the previous route
+        # has not finished before this pickup begins.
+        # -----------------------------------------------------
+
+        if driver_has_scheduling_conflict(
+            driver_id=driver["id"],
+            proposed_pickup_start=pickup_start,
+        ):
+            continue
+
 
         # Must finish loading before pickup deadline.
         if pickup_complete > pickup_deadline:
@@ -1890,7 +1979,8 @@ def optimize_rescue_plan(
                 "no_feasible_plan",
 
             "reason":
-                "No driver can reach the donor before the pickup deadline.",
+                "No driver is available and able to reach "
+                "the donor before the pickup deadline.",
 
             "rescued_lbs": 0,
 

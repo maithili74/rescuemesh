@@ -8,6 +8,14 @@ from app.optimizer.rescue_optimizer import (
     optimize_rescue_plan,
 )
 
+from app.events.processor import (
+    process_event,
+)
+
+from app.events.processor import (
+    process_event,
+)
+
 def _format_time(value):
     if isinstance(value, time):
         return value.strftime("%H:%M")
@@ -280,3 +288,171 @@ def create_donation_and_coordinate(
         "agent_response":
             agent_response,
     }
+        
+# =========================================================
+# DRIVER ACTIONS
+# =========================================================
+
+def accept_driver_assignment(
+    operation_id,
+    driver_id,
+):
+    return process_event(
+        operation_id=
+            operation_id,
+
+        event_type=
+            "DRIVER_ACCEPTED",
+
+        payload={
+            "driver_id":
+                driver_id,
+        },
+    )
+
+
+def confirm_driver_pickup(
+    operation_id,
+    driver_id,
+):
+    return process_event(
+        operation_id=
+            operation_id,
+
+        event_type=
+            "PICKUP_COMPLETED",
+
+        payload={
+            "driver_id":
+                driver_id,
+        },
+    )
+
+
+def mark_driver_delivery(
+    operation_id,
+    stop_id,
+):
+    return process_event(
+        operation_id=
+            operation_id,
+
+        event_type=
+            "DELIVERY_COMPLETED",
+
+        payload={
+            "stop_id":
+                stop_id,
+        },
+    )
+    
+# =========================================================
+# PANTRY ACTIONS
+# =========================================================
+
+def confirm_pantry_receipt(
+    operation_id,
+    stop_id,
+):
+    """
+    Pantry confirms that a driver-delivered stop
+    was actually received.
+    """
+
+    return process_event(
+        operation_id=
+            operation_id,
+
+        event_type=
+            "PANTRY_RECEIVED",
+
+        payload={
+            "stop_id":
+                stop_id,
+        },
+    )
+
+
+def update_pantry_capacity(
+    operation_id,
+    pantry_id,
+    new_max_capacity_lbs,
+):
+    """
+    Update the pantry's TOTAL capacity.
+
+    RescueMesh decides whether the existing plan can
+    remain or whether replanning is necessary.
+    """
+
+    return process_event(
+        operation_id=
+            operation_id,
+
+        event_type=
+            "PANTRY_CAPACITY_CHANGED",
+
+        payload={
+            "pantry_id":
+                pantry_id,
+
+            "new_max_capacity_lbs":
+                float(
+                    new_max_capacity_lbs
+                ),
+        },
+    )
+
+
+def close_pantry(
+    operation_id,
+    pantry_id,
+):
+    """
+    Mark the pantry unavailable and allow RescueMesh
+    to replan affected rescue operations.
+    """
+
+    return process_event(
+        operation_id=
+            operation_id,
+
+        event_type=
+            "PANTRY_CLOSED",
+
+        payload={
+            "pantry_id":
+                pantry_id,
+        },
+    )
+    
+from app.tools.escalation_tools import (
+    approve_human_escalation,
+)
+
+
+# =========================================================
+# HUMAN ESCALATION ACTION
+# =========================================================
+
+def resolve_human_escalation(
+    escalation_id,
+    option_id,
+):
+    """
+    A HUMAN explicitly selects one of RescueMesh's
+    pre-defined escalation options.
+
+    The autonomous agent does not make this decision.
+    """
+
+    return approve_human_escalation(
+        escalation_id=
+            escalation_id,
+
+        option_id=
+            option_id,
+
+        notes=
+            "Decision made from RescueMesh Operations Center.",
+    )

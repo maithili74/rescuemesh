@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+.history/
+data/
+test_execution.py
+scripts/seed_database.py

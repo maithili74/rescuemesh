@@ -80,7 +80,7 @@ with hero_right:
 
     image_path = (
         ASSETS_DIR
-        / "image.png"
+        / "image1.png"
     )
 
     if image_path.exists():

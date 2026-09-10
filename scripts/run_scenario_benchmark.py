@@ -10,6 +10,10 @@ from datetime import (
 
 
 SCENARIOS = [
+    # =====================================================
+    # CORE LOGISTICS
+    # =====================================================
+
     {
         "name":
             "Transport capacity shortage",
@@ -32,7 +36,7 @@ SCENARIOS = [
             "Pantry capacity shortage",
 
         "description":
-            "Available pantry capacity cannot hold the full donation.",
+            "Pantries cannot hold the entire donation.",
 
         "test":
             (
@@ -49,7 +53,7 @@ SCENARIOS = [
             "Exact driver capacity",
 
         "description":
-            "Driver capacity exactly matches the assigned food.",
+            "Driver capacity exactly matches assigned food.",
 
         "test":
             (
@@ -63,7 +67,7 @@ SCENARIOS = [
 
     {
         "name":
-            "Pickup at deadline boundary",
+            "Pickup deadline boundary",
 
         "description":
             "Pickup completes exactly at the allowed deadline.",
@@ -83,7 +87,7 @@ SCENARIOS = [
             "Multi-stop driver route",
 
         "description":
-            "One driver serves multiple nearby pantries.",
+            "One driver serves multiple compatible pantries.",
 
         "test":
             (
@@ -100,7 +104,7 @@ SCENARIOS = [
             "Driver shift violation",
 
         "description":
-            "A route would finish after the driver's available shift.",
+            "Proposed route ends after the driver's shift.",
 
         "test":
             (
@@ -110,6 +114,98 @@ SCENARIOS = [
 
         "expected_behavior":
             "Safe rejection",
+    },
+
+    # =====================================================
+    # RESOURCE SCHEDULING
+    # =====================================================
+
+    {
+        "name":
+            "Overlapping driver assignment",
+
+        "description":
+            (
+                "Driver already has a RescueMesh route "
+                "during the proposed pickup window."
+            ),
+
+        "test":
+            (
+                "tests/test_scheduling.py::"
+                "test_pickup_feasibility_excludes_double_booked_driver"
+            ),
+
+        "expected_behavior":
+            "Driver excluded",
+    },
+
+    # =====================================================
+    # AUTONOMOUS RECOVERY
+    # =====================================================
+
+    {
+        "name":
+            "Pantry capacity disruption",
+
+        "description":
+            (
+                "A pantry loses capacity after a rescue "
+                "has already been planned."
+            ),
+
+        "test":
+            (
+                "tests/test_events.py::"
+                "test_pantry_capacity_drop_triggers_replan"
+            ),
+
+        "expected_behavior":
+            "Automatic replan",
+    },
+
+    {
+        "name":
+            "Safe in-transit recovery",
+
+        "description":
+            (
+                "A disruption occurs while food is in transit "
+                "and a fully safe alternative plan exists."
+            ),
+
+        "test":
+            (
+                "tests/test_in_transit.py::"
+                "test_full_safe_replan_does_not_create_human_escalation"
+            ),
+
+        "expected_behavior":
+            "Autonomous recovery",
+    },
+
+    # =====================================================
+    # HUMAN SAFETY BOUNDARY
+    # =====================================================
+
+    {
+        "name":
+            "Partial in-transit recovery",
+
+        "description":
+            (
+                "A disruption leaves only a partial rescue "
+                "possible, creating a genuine tradeoff."
+            ),
+
+        "test":
+            (
+                "tests/test_in_transit.py::"
+                "test_partial_replan_creates_real_human_escalation"
+            ),
+
+        "expected_behavior":
+            "Human escalation",
     },
 ]
 
@@ -158,6 +254,7 @@ def run_test(
 def main():
 
     print()
+
     print(
         "=" * 70
     )
@@ -178,6 +275,7 @@ def main():
     ):
 
         print()
+
         print(
             f"[{number}/{len(SCENARIOS)}] "
             f"{scenario['name']}"
@@ -208,7 +306,9 @@ def main():
 
         result = {
             "name":
-                scenario["name"],
+                scenario[
+                    "name"
+                ],
 
             "description":
                 scenario[
@@ -238,7 +338,9 @@ def main():
     passed = sum(
         1
         for result in results
-        if result["passed"]
+        if result[
+            "passed"
+        ]
     )
 
     failed = (
@@ -298,6 +400,7 @@ def main():
         )
 
     print()
+
     print(
         "=" * 70
     )
@@ -328,10 +431,10 @@ def main():
     print()
 
     print(
-        f"Saved to: {path}"
+        f"Saved to: "
+        f"{path}"
     )
 
 
 if __name__ == "__main__":
-
     main()

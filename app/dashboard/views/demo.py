@@ -1,5 +1,9 @@
 import streamlit as st
 
+from app.dashboard.services.demo_reset import (
+    reset_demo_environment,
+)
+
 from app.dashboard.services.actions import (
     accept_driver_assignment,
     confirm_driver_pickup,
@@ -65,6 +69,223 @@ def render_demo_view():
     )
 
     st.divider()
+    
+    # =====================================================
+    # DEMO RESET
+    # =====================================================
+
+    with st.expander(
+        "🔄 Reset Demo Environment",
+        expanded=False,
+    ):
+
+        st.write(
+            "Restore RescueMesh to the clean seeded "
+            "starting state before a judge demo or "
+            "video recording."
+        )
+
+        st.warning(
+            "This deletes the current demo operations, "
+            "routes, delivery stops, events and "
+            "escalations from the local RescueMesh "
+            "database."
+        )
+
+        confirm_reset = (
+            st.checkbox(
+                "I understand that current demo "
+                "activity will be cleared.",
+                key=
+                    "confirm_demo_reset",
+            )
+        )
+
+        if st.button(
+            "Reset RescueMesh Demo",
+            type="primary",
+            use_container_width=True,
+            disabled=
+                not confirm_reset,
+            key=
+                "reset_rescuemesh_demo",
+        ):
+
+            try:
+
+                with st.spinner(
+                    "Restoring clean demo state..."
+                ):
+
+                    result = (
+                        reset_demo_environment()
+                    )
+
+                # Clear any Streamlit cached database
+                # results if caching is introduced.
+                st.cache_data.clear()
+
+                st.session_state[
+                    "demo_reset_complete"
+                ] = True
+
+                st.session_state[
+                    "demo_reset_counts"
+                ] = result[
+                    "counts"
+                ]
+
+                st.rerun()
+
+            except Exception as error:
+
+                st.error(
+                    f"Demo reset failed: {error}"
+                )
+
+        if st.session_state.get(
+            "demo_reset_complete"
+        ):
+
+            st.success(
+                "✅ Clean demo environment ready."
+            )
+
+            counts = (
+                st.session_state.get(
+                    "demo_reset_counts",
+                    {},
+                )
+            )
+
+            if counts:
+
+                c1, c2, c3 = (
+                    st.columns(3)
+                )
+
+                with c1:
+
+                    st.metric(
+                        "Operations",
+                        counts.get(
+                            "operations",
+                            0,
+                        ),
+                    )
+
+                with c2:
+
+                    st.metric(
+                        "Routes",
+                        counts.get(
+                            "driver_routes",
+                            0,
+                        ),
+                    )
+
+                with c3:
+
+                    st.metric(
+                        "Events",
+                        counts.get(
+                            "events",
+                            0,
+                        ),
+                    )
+
+
+    # =====================================================
+    # GOLDEN DEMO GUIDE
+    # =====================================================
+
+    with st.expander(
+        "⭐ Golden Demo Flow",
+        expanded=False,
+    ):
+
+        st.markdown(
+            """
+### 1. Create the rescue
+
+Go to **Donor → Community Bakery** and create:
+
+- **Food:** Prepared Food
+- **Quantity:** 50 lbs
+- **Available:** 11:00
+- **Pickup deadline:** 14:00
+
+Click **Create Donation & Start Rescue**.
+
+RescueMesh will use the real Strands + Bedrock
+coordination flow and deterministic logistics
+optimizer to create the rescue plan.
+
+### 2. Show the dispatch
+
+Open **Driver Dispatch**.
+
+Show the assigned driver, pickup time, pantry
+destinations, quantities and ETAs.
+
+### 3. Simulate the driver
+
+Return to **Demo Simulator**.
+
+Use the controls in order:
+
+**Accept Assignment → Confirm Pickup → Deliver**
+
+These buttons simulate events that would normally
+arrive from the driver's phone or lightweight
+mobile interface.
+
+### 4. Confirm delivery at the pantry
+
+Open **Pantry** and select the pantry that the
+driver reported delivering to.
+
+Click:
+
+**Confirm Food Received**
+
+This creates the real pantry-side confirmation.
+
+### 5. Finish remaining stops
+
+If the rescue has another pantry stop:
+
+**Demo Simulator → Deliver next stop**
+
+then:
+
+**Pantry → Confirm Received**
+
+### 6. Show the completed rescue
+
+Open **Operations**.
+
+The operation should now show:
+
+**✅ Rescue Completed**
+
+with all delivery stops confirmed.
+
+Then open **Impact & Evaluation** to show the
+measured RescueMesh results and benchmark coverage.
+            """
+        )
+
+        st.info(
+            "The optimizer may choose a different "
+            "driver or pantry combination if network "
+            "state changes. Always follow the actual "
+            "plan RescueMesh generates."
+        )
+
+    st.divider()    
+    
+    
 
     operations = get_operations_dashboard(
         limit=20

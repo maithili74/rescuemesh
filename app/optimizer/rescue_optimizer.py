@@ -1867,6 +1867,52 @@ def optimize_driver_routes(
 # COMPLETE RESCUEMESH OPTIMIZER
 # =========================================================
 
+
+def _get_shift_violation_driver_name(
+    error,
+):
+    """
+    Extract the driver name from the route validation
+    error produced when a route would finish after the
+    driver's shift.
+
+    Example:
+
+        Route for Lisa finishes at 17:06,
+        but their shift ends at 17:00.
+    """
+
+    message = str(
+        error
+    )
+
+    prefix = "Route for "
+    marker = " finishes at "
+
+    if (
+        message.startswith(
+            prefix
+        )
+        and
+        marker in message
+        and
+        "shift ends at"
+        in message
+    ):
+        return (
+            message[
+                len(prefix):
+            ]
+            .split(
+                marker,
+                1,
+            )[0]
+            .strip()
+        )
+
+    return None
+
+
 def optimize_rescue_plan(
     donation_id,
 ):
@@ -1874,10 +1920,15 @@ def optimize_rescue_plan(
     Full RescueMesh optimization pipeline.
 
     1. Load current state.
-    2. Get real road matrix.
-    3. Remove drivers who cannot reach donor in time.
-    4. PuLP selects pantry quantities.
-    5. OR-Tools assigns drivers and multi-stop routes.
+    2. Get compatible pantries and eligible drivers.
+    3. Build real road network.
+    4. Remove pickup-infeasible drivers.
+    5. PuLP selects pantry quantities.
+    6. OR-Tools assigns drivers and routes.
+    7. If a driver's completed route violates their
+       shift, exclude ONLY that driver and retry.
+    8. Require human attention only when no safe
+       driver solution remains.
     """
 
     state = get_network_state(
@@ -1888,6 +1939,7 @@ def optimize_rescue_plan(
 
         return {
             "status": "error",
+
             "message":
                 f"Donation {donation_id} does not exist.",
         }
@@ -1904,9 +1956,15 @@ def optimize_rescue_plan(
         "eligible_drivers"
     ]
 
-    quantity = donation[
-        "quantity_lbs"
-    ]
+    quantity = float(
+        donation[
+            "quantity_lbs"
+        ]
+    )
+
+    # =====================================================
+    # BASIC NETWORK CHECKS
+    # =====================================================
 
     if not pantries:
 
@@ -1917,10 +1975,14 @@ def optimize_rescue_plan(
             "reason":
                 "No compatible pantry is available.",
 
-            "rescued_lbs": 0,
+            "rescued_lbs":
+                0,
 
             "unrescued_lbs":
                 quantity,
+
+            "human_attention_required":
+                True,
         }
 
     if not drivers:
@@ -1930,208 +1992,431 @@ def optimize_rescue_plan(
                 "no_feasible_plan",
 
             "reason":
-                "No driver overlaps the donation window.",
-
-            "rescued_lbs": 0,
-
-            "unrescued_lbs":
-                quantity,
-        }
-
-    # -----------------------------------------------------
-    # Real road data
-    # -----------------------------------------------------
-
-    try:
-
-        network = build_network_matrix(
-            donation,
-            pantries,
-            drivers,
-        )
-
-    except Exception as error:
-
-        return {
-            "status":
-                "routing_error",
-
-            "reason":
-                str(error),
-        }
-
-    # -----------------------------------------------------
-    # Real pickup feasibility
-    # -----------------------------------------------------
-
-    feasible_drivers = (
-        get_pickup_feasible_drivers(
-            donation,
-            drivers,
-            network,
-        )
-    )
-
-    if not feasible_drivers:
-
-        return {
-            "status":
-                "no_feasible_plan",
-
-            "reason":
-                "No driver is available and able to reach "
-                "the donor before the pickup deadline.",
-
-            "rescued_lbs": 0,
-
-            "unrescued_lbs":
-                quantity,
-        }
-
-    # -----------------------------------------------------
-    # PuLP allocation
-    # -----------------------------------------------------
-
-    pantry_assignments = (
-        optimize_pantry_quantities(
-            donation,
-            pantries,
-            feasible_drivers,
-            network,
-        )
-    )
-
-    if not pantry_assignments:
-
-        return {
-            "status":
-                "no_feasible_plan",
-
-            "reason":
-                "No pantry allocation could be created.",
-
-            "rescued_lbs": 0,
-
-            "unrescued_lbs":
-                quantity,
-        }
-
-    planned_rescue = sum(
-        assignment[
-            "assigned_lbs"
-        ]
-        for assignment
-        in pantry_assignments
-    )
-
-    # -----------------------------------------------------
-    # OR-Tools routes
-    # -----------------------------------------------------
-
-    routing_result = (
-        optimize_driver_routes(
-            donation,
-            pantry_assignments,
-            feasible_drivers,
-            network,
-        )
-    )
-
-    if routing_result is None:
-
-        return {
-            "status":
-                "routing_infeasible",
-
-            "reason":
                 (
-                    "Pantry quantities were feasible, "
-                    "but no driver routing plan could "
-                    "satisfy all capacity/time constraints."
+                    "No driver overlaps the donation "
+                    "window. Human coordination is "
+                    "required to avoid losing the food."
                 ),
 
-            "planned_rescue_lbs":
-                planned_rescue,
+            "rescued_lbs":
+                0,
+
+            "unrescued_lbs":
+                quantity,
+
+            "human_attention_required":
+                True,
         }
 
-    rescued_lbs = sum(
-        route[
-            "assigned_lbs"
-        ]
+    # =====================================================
+    # DRIVER RETRY STATE
+    # =====================================================
 
-        for route in routing_result[
-            "routes"
-        ]
+    remaining_drivers = list(
+        drivers
     )
 
-    unrescued = max(
-        0,
-        quantity
-        -
-        rescued_lbs,
-    )
+    driver_rejections = []
+
+    # We may need multiple attempts:
+    #
+    # Lisa fails shift constraint
+    #       ↓
+    # remove Lisa
+    #       ↓
+    # rebuild network
+    #       ↓
+    # try remaining drivers
+
+    while remaining_drivers:
+
+        # =================================================
+        # REAL ROAD NETWORK
+        # =================================================
+
+        try:
+
+            network = (
+                build_network_matrix(
+                    donation,
+                    pantries,
+                    remaining_drivers,
+                )
+            )
+
+        except Exception as error:
+
+            return {
+                "status":
+                    "routing_error",
+
+                "reason":
+                    str(error),
+
+                "driver_rejections":
+                    driver_rejections,
+            }
+
+        # =================================================
+        # PICKUP FEASIBILITY
+        # =================================================
+
+        feasible_drivers = (
+            get_pickup_feasible_drivers(
+                donation,
+                remaining_drivers,
+                network,
+            )
+        )
+
+        if not feasible_drivers:
+
+            return {
+                "status":
+                    "no_feasible_plan",
+
+                "reason":
+                    (
+                        "No remaining driver can safely "
+                        "reach the donor before the pickup "
+                        "deadline. Human coordination is "
+                        "required."
+                    ),
+
+                "rescued_lbs":
+                    0,
+
+                "unrescued_lbs":
+                    quantity,
+
+                "human_attention_required":
+                    True,
+
+                "driver_rejections":
+                    driver_rejections,
+            }
+
+        # =================================================
+        # PANTRY ALLOCATION
+        # =================================================
+
+        pantry_assignments = (
+            optimize_pantry_quantities(
+                donation,
+                pantries,
+                feasible_drivers,
+                network,
+            )
+        )
+
+        if not pantry_assignments:
+
+            return {
+                "status":
+                    "no_feasible_plan",
+
+                "reason":
+                    (
+                        "No safe pantry allocation could "
+                        "be created with the remaining "
+                        "drivers."
+                    ),
+
+                "rescued_lbs":
+                    0,
+
+                "unrescued_lbs":
+                    quantity,
+
+                "human_attention_required":
+                    True,
+
+                "driver_rejections":
+                    driver_rejections,
+            }
+
+        planned_rescue = sum(
+            float(
+                assignment[
+                    "assigned_lbs"
+                ]
+            )
+
+            for assignment
+            in pantry_assignments
+        )
+
+        # =================================================
+        # DRIVER ROUTING
+        # =================================================
+
+        try:
+
+            routing_result = (
+                optimize_driver_routes(
+                    donation,
+                    pantry_assignments,
+                    feasible_drivers,
+                    network,
+                )
+            )
+
+        except ValueError as error:
+
+            # ---------------------------------------------
+            # DID A SPECIFIC DRIVER VIOLATE THEIR SHIFT?
+            # ---------------------------------------------
+
+            rejected_driver_name = (
+                _get_shift_violation_driver_name(
+                    error
+                )
+            )
+
+            # If this is some OTHER ValueError, don't
+            # hide a real bug.
+            if (
+                rejected_driver_name
+                is None
+            ):
+                raise
+
+            rejected_driver = next(
+                (
+                    driver
+
+                    for driver
+                    in feasible_drivers
+
+                    if (
+                        driver[
+                            "name"
+                        ].strip().lower()
+                        ==
+                        rejected_driver_name
+                        .strip()
+                        .lower()
+                    )
+                ),
+                None,
+            )
+
+            if (
+                rejected_driver
+                is None
+            ):
+                # The validator named a driver we could
+                # not identify. Do not silently continue.
+                raise
+
+            # ---------------------------------------------
+            # RECORD WHY THEY WERE REMOVED
+            # ---------------------------------------------
+
+            driver_rejections.append(
+                {
+                    "driver_id":
+                        rejected_driver[
+                            "id"
+                        ],
+
+                    "driver_name":
+                        rejected_driver[
+                            "name"
+                        ],
+
+                    "reason":
+                        str(error),
+
+                    "constraint":
+                        "shift_end",
+                }
+            )
+
+            # ---------------------------------------------
+            # EXCLUDE ONLY THIS DRIVER
+            # ---------------------------------------------
+
+            remaining_drivers = [
+                driver
+
+                for driver
+                in remaining_drivers
+
+                if (
+                    driver[
+                        "id"
+                    ]
+                    !=
+                    rejected_driver[
+                        "id"
+                    ]
+                )
+            ]
+
+            # ---------------------------------------------
+            # TRY AGAIN
+            # ---------------------------------------------
+
+            continue
+
+        # =================================================
+        # ROUTING SOLVER FOUND NO SOLUTION
+        # =================================================
+
+        if routing_result is None:
+
+            return {
+                "status":
+                    "routing_infeasible",
+
+                "reason":
+                    (
+                        "Pantry quantities were feasible, "
+                        "but no remaining driver routing "
+                        "plan could satisfy all capacity "
+                        "and time constraints. Human "
+                        "coordination is required."
+                    ),
+
+                "planned_rescue_lbs":
+                    planned_rescue,
+
+                "rescued_lbs":
+                    0,
+
+                "unrescued_lbs":
+                    quantity,
+
+                "human_attention_required":
+                    True,
+
+                "driver_rejections":
+                    driver_rejections,
+            }
+
+        # =================================================
+        # SAFE ROUTE FOUND
+        # =================================================
+
+        rescued_lbs = sum(
+            float(
+                route[
+                    "assigned_lbs"
+                ]
+            )
+
+            for route
+            in routing_result[
+                "routes"
+            ]
+        )
+
+        unrescued = max(
+            0,
+            quantity
+            -
+            rescued_lbs,
+        )
+
+        return {
+            "status":
+                "optimal",
+
+            "donation_id":
+                donation_id,
+
+            "donor_name":
+                donation[
+                    "donor_name"
+                ],
+
+            "food_type":
+                donation[
+                    "food_type"
+                ],
+
+            "donation_quantity_lbs":
+                quantity,
+
+            "rescued_lbs":
+                round(
+                    rescued_lbs,
+                    2,
+                ),
+
+            "unrescued_lbs":
+                round(
+                    unrescued,
+                    2,
+                ),
+
+            "rescue_rate":
+                round(
+                    rescued_lbs
+                    /
+                    quantity,
+                    4,
+                ),
+
+            "drivers_used":
+                len(
+                    routing_result[
+                        "routes"
+                    ]
+                ),
+
+            "total_distance_miles":
+                routing_result[
+                    "total_distance_miles"
+                ],
+
+            "pantry_assignments":
+                pantry_assignments,
+
+            "driver_routes":
+                routing_result[
+                    "routes"
+                ],
+
+            # This is useful for evaluation/debugging.
+            "driver_rejections":
+                driver_rejections,
+
+            "human_attention_required":
+                False,
+        }
+
+    # =====================================================
+    # EVERY CANDIDATE DRIVER WAS EXCLUDED
+    # =====================================================
 
     return {
         "status":
-            "optimal",
+            "no_feasible_plan",
 
-        "donation_id":
-            donation_id,
-
-        "donor_name":
-            donation[
-                "donor_name"
-            ],
-
-        "food_type":
-            donation[
-                "food_type"
-            ],
-
-        "donation_quantity_lbs":
-            quantity,
+        "reason":
+            (
+                "RescueMesh evaluated the available "
+                "drivers but none could safely complete "
+                "the rescue within their operational "
+                "constraints. Human coordination is "
+                "required to prevent the donation from "
+                "going to waste."
+            ),
 
         "rescued_lbs":
-            round(
-                rescued_lbs,
-                2,
-            ),
+            0,
 
         "unrescued_lbs":
-            round(
-                unrescued,
-                2,
-            ),
+            quantity,
 
-        "rescue_rate":
-            round(
-                rescued_lbs
-                /
-                quantity,
-                4,
-            ),
+        "human_attention_required":
+            True,
 
-        "drivers_used":
-            len(
-                routing_result[
-                    "routes"
-                ]
-            ),
-
-        "total_distance_miles":
-            routing_result[
-                "total_distance_miles"
-            ],
-
-        "pantry_assignments":
-            pantry_assignments,
-
-        "driver_routes":
-            routing_result[
-                "routes"
-            ],
+        "driver_rejections":
+            driver_rejections,
     }
-
 
 # =========================================================
 # MANUAL TEST

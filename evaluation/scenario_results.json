@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-09-10T02:43:06.859839+00:00",
+  "timestamp": "2026-09-10T22:11:01.068346+00:00",
   "total_scenarios": 10,
   "passed": 10,
   "failed": 0,
@@ -10,14 +10,14 @@
       "description": "Donation exceeds available driver capacity.",
       "expected_behavior": "Partial rescue",
       "passed": true,
-      "duration_seconds": 0.23
+      "duration_seconds": 0.22
     },
     {
       "name": "Pantry capacity shortage",
       "description": "Pantries cannot hold the entire donation.",
       "expected_behavior": "Partial rescue",
       "passed": true,
-      "duration_seconds": 0.23
+      "duration_seconds": 0.22
     },
     {
       "name": "Exact driver capacity",
@@ -45,7 +45,7 @@
       "description": "Proposed route ends after the driver's shift.",
       "expected_behavior": "Safe rejection",
       "passed": true,
-      "duration_seconds": 0.22
+      "duration_seconds": 0.21
     },
     {
       "name": "Overlapping driver assignment",
@@ -59,7 +59,7 @@
       "description": "A pantry loses capacity after a rescue has already been planned.",
       "expected_behavior": "Automatic replan",
       "passed": true,
-      "duration_seconds": 0.25
+      "duration_seconds": 0.24
     },
     {
       "name": "Safe in-transit recovery",

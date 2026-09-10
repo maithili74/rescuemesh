@@ -13,7 +13,9 @@ from app.dashboard.services.actions import (
 from app.dashboard.services.data import (
     get_operations_dashboard,
 )
-
+from app.dashboard.views.disruptions import (
+    render_disruption_controls,
+)
 
 def pretty_food_type(food_type):
     return (
@@ -412,6 +414,15 @@ measured RescueMesh results and benchmark coverage.
         )
 
         return
+    
+    
+    # =====================================================
+    # DISRUPTION SIMULATOR
+    # =====================================================
+
+    render_disruption_controls(
+        operation["id"]
+    )
 
     # =====================================================
     # DRIVER EVENTS

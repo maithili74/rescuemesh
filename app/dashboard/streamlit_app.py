@@ -209,6 +209,5 @@ elif selected_view == "🧪 Demo Simulator":
 st.divider()
 
 st.caption(
-    "RescueMesh • Strands Agents + Amazon Bedrock "
-    "+ deterministic logistics optimization"
+    "Developed by Maithili Annavarapu"
 )

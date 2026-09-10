@@ -183,3 +183,291 @@ def test_pickup_feasibility_excludes_double_booked_driver(
     assert 2 in feasible_driver_ids
 
     assert feasible_driver_ids == [2]
+
+
+def test_shift_violation_retries_with_alternate_driver(
+    monkeypatch,
+):
+    import app.optimizer.rescue_optimizer as optimizer
+
+    donation = {
+        "id": 999,
+        "quantity_lbs": 50.0,
+        "donor_name": "Test Donor",
+        "food_type": "prepared_food",
+    }
+
+    pantries = [
+        {
+            "id": 1,
+            "name": "Test Pantry",
+        }
+    ]
+
+    lisa = {
+        "id": 3,
+        "name": "Lisa",
+    }
+
+    emily = {
+        "id": 4,
+        "name": "Emily",
+    }
+
+    monkeypatch.setattr(
+        optimizer,
+        "get_network_state",
+        lambda donation_id: {
+            "donation": donation,
+            "compatible_pantries": pantries,
+            "eligible_drivers": [
+                lisa,
+                emily,
+            ],
+        },
+    )
+
+    monkeypatch.setattr(
+        optimizer,
+        "build_network_matrix",
+        lambda donation, pantries, drivers: {
+            "test": True
+        },
+    )
+
+    monkeypatch.setattr(
+        optimizer,
+        "get_pickup_feasible_drivers",
+        lambda donation, drivers, network:
+            drivers,
+    )
+
+    monkeypatch.setattr(
+        optimizer,
+        "optimize_pantry_quantities",
+        lambda donation, pantries, drivers, network: [
+            {
+                "pantry_id": 1,
+                "assigned_lbs": 50.0,
+            }
+        ],
+    )
+
+    routing_attempts = []
+
+    def fake_routes(
+        donation,
+        assignments,
+        drivers,
+        network,
+    ):
+        names = [
+            driver["name"]
+            for driver in drivers
+        ]
+
+        routing_attempts.append(
+            names
+        )
+
+        if "Lisa" in names:
+
+            raise ValueError(
+                "Route for Lisa finishes at 17:06, "
+                "but their shift ends at 17:00."
+            )
+
+        return {
+            "routes": [
+                {
+                    "driver_id": 4,
+                    "driver_name": "Emily",
+                    "assigned_lbs": 50.0,
+                }
+            ],
+            "total_distance_miles": 5.0,
+        }
+
+    monkeypatch.setattr(
+        optimizer,
+        "optimize_driver_routes",
+        fake_routes,
+    )
+
+    result = (
+        optimizer.optimize_rescue_plan(
+            999
+        )
+    )
+
+    assert (
+        result["status"]
+        ==
+        "optimal"
+    )
+
+    assert (
+        result["rescued_lbs"]
+        ==
+        50.0
+    )
+
+    assert (
+        result[
+            "human_attention_required"
+        ]
+        is False
+    )
+
+    assert routing_attempts == [
+        [
+            "Lisa",
+            "Emily",
+        ],
+        [
+            "Emily",
+        ],
+    ]
+
+    assert (
+        len(
+            result[
+                "driver_rejections"
+            ]
+        )
+        ==
+        1
+    )
+
+    assert (
+        result[
+            "driver_rejections"
+        ][0][
+            "driver_name"
+        ]
+        ==
+        "Lisa"
+    )
+
+    assert (
+        result[
+            "driver_rejections"
+        ][0][
+            "constraint"
+        ]
+        ==
+        "shift_end"
+    )
+
+
+def test_shift_violation_requires_human_when_no_driver_remains(
+    monkeypatch,
+):
+    import app.optimizer.rescue_optimizer as optimizer
+
+    donation = {
+        "id": 999,
+        "quantity_lbs": 50.0,
+        "donor_name": "Test Donor",
+        "food_type": "prepared_food",
+    }
+
+    lisa = {
+        "id": 3,
+        "name": "Lisa",
+    }
+
+    monkeypatch.setattr(
+        optimizer,
+        "get_network_state",
+        lambda donation_id: {
+            "donation": donation,
+            "compatible_pantries": [
+                {
+                    "id": 1,
+                    "name": "Test Pantry",
+                }
+            ],
+            "eligible_drivers": [
+                lisa
+            ],
+        },
+    )
+
+    monkeypatch.setattr(
+        optimizer,
+        "build_network_matrix",
+        lambda donation, pantries, drivers: {
+            "test": True
+        },
+    )
+
+    monkeypatch.setattr(
+        optimizer,
+        "get_pickup_feasible_drivers",
+        lambda donation, drivers, network:
+            drivers,
+    )
+
+    monkeypatch.setattr(
+        optimizer,
+        "optimize_pantry_quantities",
+        lambda donation, pantries, drivers, network: [
+            {
+                "pantry_id": 1,
+                "assigned_lbs": 50.0,
+            }
+        ],
+    )
+
+    def fake_routes(
+        donation,
+        assignments,
+        drivers,
+        network,
+    ):
+        raise ValueError(
+            "Route for Lisa finishes at 17:06, "
+            "but their shift ends at 17:00."
+        )
+
+    monkeypatch.setattr(
+        optimizer,
+        "optimize_driver_routes",
+        fake_routes,
+    )
+
+    result = (
+        optimizer.optimize_rescue_plan(
+            999
+        )
+    )
+
+    assert (
+        result["status"]
+        ==
+        "no_feasible_plan"
+    )
+
+    assert (
+        result[
+            "human_attention_required"
+        ]
+        is True
+    )
+
+    assert (
+        result["unrescued_lbs"]
+        ==
+        50.0
+    )
+
+    assert (
+        result[
+            "driver_rejections"
+        ][0][
+            "driver_name"
+        ]
+        ==
+        "Lisa"
+    )

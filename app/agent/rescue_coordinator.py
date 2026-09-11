@@ -49,15 +49,45 @@ the corresponding RescueMesh backend state confirms it.
 """
 
 
-bedrock_model = BedrockModel(
-    model_id="us.anthropic.claude-haiku-4-5-20251001-v1:0",
-    region_name="us-east-1",
-    temperature=0.0,
-)
+def create_rescue_coordinator(
+    tools=None,
+):
+    """
+    Create a RescueMesh Strands coordinator.
+
+    By default the normal RescueMesh application uses
+    local Python tools.
+
+    AgentCore can supply HTTP-backed tools that operate
+    on the deployed RescueMesh backend.
+    """
+
+    bedrock_model = BedrockModel(
+        model_id=(
+            "us.anthropic."
+            "claude-haiku-4-5-20251001-v1:0"
+        ),
+        region_name="us-east-1",
+        temperature=0.0,
+    )
+
+    agent_tools = (
+        RESCUE_COORDINATOR_TOOLS
+        if tools is None
+        else tools
+    )
+
+    return Agent(
+        model=bedrock_model,
+        system_prompt=SYSTEM_PROMPT,
+        tools=agent_tools,
+    )
 
 
-agent = Agent(
-    model=bedrock_model,
-    system_prompt=SYSTEM_PROMPT,
-    tools=RESCUE_COORDINATOR_TOOLS,
-)
+# Preserve compatibility with the existing RescueMesh application.
+# Existing code that imports:
+#
+#     from app.agent.rescue_coordinator import agent
+#
+# will continue to work exactly as before.
+agent = create_rescue_coordinator()

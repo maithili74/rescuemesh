@@ -1,8 +1,6 @@
 from strands import Agent
 from strands.models import BedrockModel
 
-from app.tools import RESCUE_COORDINATOR_TOOLS
-
 
 SYSTEM_PROMPT = """
 You are RescueMesh's autonomous food-rescue coordinator.
@@ -55,12 +53,24 @@ def create_rescue_coordinator(
     """
     Create a RescueMesh Strands coordinator.
 
-    By default the normal RescueMesh application uses
-    local Python tools.
+    Local RescueMesh:
+        uses the normal Python tools.
 
-    AgentCore can supply HTTP-backed tools that operate
-    on the deployed RescueMesh backend.
+    AgentCore:
+        supplies the HTTP-backed remote tools.
     """
+
+    # Import the heavy/local RescueMesh tool stack ONLY
+    # when the caller did not provide another tool set.
+    #
+    # AgentCore passes REMOTE_RESCUE_COORDINATOR_TOOLS,
+    # so this local import never happens in AgentCore.
+    if tools is None:
+        from app.tools import (
+            RESCUE_COORDINATOR_TOOLS,
+        )
+
+        tools = RESCUE_COORDINATOR_TOOLS
 
     bedrock_model = BedrockModel(
         model_id=(
@@ -71,23 +81,55 @@ def create_rescue_coordinator(
         temperature=0.0,
     )
 
-    agent_tools = (
-        RESCUE_COORDINATOR_TOOLS
-        if tools is None
-        else tools
-    )
-
     return Agent(
         model=bedrock_model,
         system_prompt=SYSTEM_PROMPT,
-        tools=agent_tools,
+        tools=tools,
     )
 
 
-# Preserve compatibility with the existing RescueMesh application.
-# Existing code that imports:
-#
-#     from app.agent.rescue_coordinator import agent
-#
-# will continue to work exactly as before.
-agent = create_rescue_coordinator()
+class _LazyLocalAgent:
+    """
+    Preserve the existing:
+
+        from app.agent.rescue_coordinator import agent
+
+    interface without creating the local agent at module
+    import time.
+
+    This keeps AgentCore lightweight while preserving the
+    existing RescueMesh application behavior.
+    """
+
+    def __init__(self):
+        self._agent = None
+
+    def _get_agent(self):
+        if self._agent is None:
+            self._agent = (
+                create_rescue_coordinator()
+            )
+
+        return self._agent
+
+    def __call__(
+        self,
+        *args,
+        **kwargs,
+    ):
+        return self._get_agent()(
+            *args,
+            **kwargs,
+        )
+
+    def __getattr__(
+        self,
+        name,
+    ):
+        return getattr(
+            self._get_agent(),
+            name,
+        )
+
+
+agent = _LazyLocalAgent()

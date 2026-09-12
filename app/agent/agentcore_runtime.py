@@ -5,9 +5,11 @@ from bedrock_agentcore.runtime import (
 from app.agent.rescue_coordinator import (
     create_rescue_coordinator,
 )
+
 from app.tools.remote_tools import (
     REMOTE_RESCUE_COORDINATOR_TOOLS,
 )
+
 
 app = BedrockAgentCoreApp()
 
@@ -17,22 +19,27 @@ def invoke(payload, context):
     """
     Amazon Bedrock AgentCore Runtime entrypoint.
 
-    AgentCore receives a JSON payload such as:
+    Expected payload:
 
         {
             "prompt": "Inspect donation 21 and plan the rescue."
         }
 
-    The request is passed to the same RescueMesh Strands
-    RescueCoordinator used by the existing application.
+    The AgentCore-hosted RescueCoordinator uses remote
+    RescueMesh tools. Those tools call the FastAPI backend
+    running with the main RescueMesh application.
     """
+
+    # -----------------------------------------------------
+    # VALIDATE PAYLOAD
+    # -----------------------------------------------------
 
     if not isinstance(
         payload,
         dict,
     ):
         return {
-            "error":
+            "response":
                 "Payload must be a JSON object."
         }
 
@@ -46,24 +53,41 @@ def invoke(payload, context):
             prompt,
             str,
         )
-        or
-        not prompt.strip()
+        or not prompt.strip()
     ):
         return {
-            "error":
-                "'prompt' must be a non-empty string."
+            "response":
+                "A non-empty prompt is required."
         }
 
-    # Fresh agent for this invocation.
-    # This prevents unrelated RescueMesh requests from
-    # sharing accidental conversational state.
+    # -----------------------------------------------------
+    # CREATE AGENTCORE RESCUE COORDINATOR
+    # -----------------------------------------------------
+
+    # A fresh agent is created for every invocation.
+    #
+    # IMPORTANT:
+    # AgentCore must use the REMOTE tools because the
+    # SQLite database and deterministic optimizer live
+    # on the RescueMesh backend server, not inside the
+    # AgentCore Runtime container.
+
     agent = create_rescue_coordinator(
-        tools=REMOTE_RESCUE_COORDINATOR_TOOLS,
+        tools=
+            REMOTE_RESCUE_COORDINATOR_TOOLS
     )
+
+    # -----------------------------------------------------
+    # RUN STRANDS AGENT
+    # -----------------------------------------------------
 
     result = agent(
         prompt.strip()
     )
+
+    # -----------------------------------------------------
+    # RETURN AGENTCORE RESPONSE
+    # -----------------------------------------------------
 
     return {
         "response":

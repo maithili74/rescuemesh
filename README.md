@@ -7,13 +7,15 @@
 ![Strands Agents](https://img.shields.io/badge/Agents-Strands-purple)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-**RescueMesh** coordinates surplus food from donors to community pantries through volunteer drivers.
+**RescueMesh** is an autonomous food-rescue coordination system that turns a surplus-food donation into an executable rescue operation.
 
-Instead of only suggesting what someone should do, RescueMesh handles the rescue workflow end to end:
+It matches real-time pantry demand with available volunteer drivers, optimizes food allocation and delivery routes, tracks the rescue through pickup and verified delivery, and automatically replans when disruptions occur.
 
-**donation → planning → driver dispatch → delivery → pantry confirmation**
+Unlike a chatbot that only recommends what people should do, RescueMesh coordinates the actual workflow across **donors, drivers, pantries, and operators** while preserving deterministic safety constraints and escalating to a human when no clearly safe option exists.
 
-Built for the **AWS Agents for Humans Hackathon — Good Neighbor Agents** track.
+**Donation → AI coordination → deterministic planning → driver dispatch → delivery → pantry verification**
+
+Built for the **AWS Agents for Humans Hackathon — Good Neighbor Agents** track to demonstrate an AI agent that performs real operational work for a real community need.
 
 🌐 **Live Demo:**  
 https://18-213-41-214.nip.io

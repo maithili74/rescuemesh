@@ -1,0 +1,50 @@
+{
+  "benchmark_seed": 42,
+  "planning": {
+    "total_scenarios": 50,
+    "valid_safe_plans": 46,
+    "valid_safe_plan_rate_pct": 92.0,
+    "fully_rescued": 46,
+    "fully_rescued_pct": 92.0,
+    "partially_rescued": 0,
+    "partially_rescued_pct": 0.0,
+    "safely_rejected": 4,
+    "safely_rejected_pct": 8.0,
+    "weighted_food_rescued_pct": 89.62,
+    "average_scenario_rescue_pct": 92.0,
+    "unsafe_plan_count": 0,
+    "capacity_violations": 0,
+    "driver_double_booking_violations": 0,
+    "driver_shift_violations": 0,
+    "pickup_deadline_violations": 0,
+    "all_violation_counts": {
+      "driver_capacity": 0,
+      "driver_double_booking": 0,
+      "driver_shift": 0,
+      "pickup_deadline": 0,
+      "pantry_capacity": 0,
+      "donation_accounting_mismatch": 0,
+      "route_stop_quantity_mismatch": 0,
+      "route_total_mismatch": 0,
+      "pantry_total_mismatch": 0,
+      "rescued_more_than_donation": 0,
+      "negative_rescued_lbs": 0,
+      "negative_unrescued_lbs": 0,
+      "non_positive_delivery": 0
+    },
+    "avg_planning_latency_ms": 6422.78,
+    "median_planning_latency_ms": 5904.74,
+    "p95_planning_latency_ms": 6631.29
+  },
+  "disruptions": {
+    "requested_scenarios": 10,
+    "executed_scenarios": 10,
+    "autonomous_recoveries": 10,
+    "autonomous_recovery_pct": 100.0,
+    "human_escalations": 0,
+    "human_escalation_pct": 0.0,
+    "unsafe_autonomous_recoveries": 0,
+    "avg_disruption_latency_ms": 791.05,
+    "p95_disruption_latency_ms": 1396.7
+  }
+}

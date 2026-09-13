@@ -212,7 +212,11 @@ The optimizer may select different drivers or pantries depending on the current 
 
 ## Evaluation
 
-The current project has:
+RescueMesh was evaluated using automated tests and reproducible randomized logistics scenarios.
+
+### Automated Tests
+
+The project currently has:
 
 **53 passing automated tests**
 
@@ -220,22 +224,63 @@ The current project has:
 pytest tests/ -q
 ```
 
-The rescue evaluation framework also measures:
+These tests cover planning constraints, driver availability, capacity limits, deadlines, routing behavior, disruption recovery, and workflow state transitions.
 
-- feasible-plan success;
-- percentage of food rescued;
-- autonomous disruption recovery;
-- human escalation rate;
-- planning latency;
-- capacity violations;
-- double-booking violations;
-- shift violations;
-- deadline violations;
-- invalid completed deliveries.
+### Randomized Logistics Benchmark
 
-Final benchmark results will be reported from the evaluation harness rather than estimated manually.
+Using a reproducible benchmark with `seed=42`, RescueMesh was evaluated on **50 randomized planning scenarios**.
 
----
+| Metric | Result |
+|---|---:|
+| Randomized planning scenarios | 50 |
+| Rescue plans generated | 46 / 50 (92%) |
+| Fully rescued scenarios | 46 / 50 (92%) |
+| Safely rejected infeasible scenarios | 4 / 50 (8%) |
+| Safety compliance among generated plans | 46 / 46 (100%) |
+| Weighted food rescued | 89.62% |
+| Unsafe plans | 0 |
+| Capacity violations | 0 |
+| Driver double-booking violations | 0 |
+| Driver shift violations | 0 |
+| Pickup deadline violations | 0 |
+| Average planning latency | 6.42 s |
+| P95 planning latency | 6.63 s |
+
+All generated rescue plans passed the benchmark's independent safety checks. When a randomized scenario had no feasible rescue, RescueMesh safely rejected it rather than producing an invalid plan.
+
+### Disruption Recovery
+
+The benchmark also simulated **10 in-transit pantry-closure disruptions**.
+
+| Metric | Result |
+|---|---:|
+| Disruption scenarios | 10 |
+| Autonomous recoveries | 10 / 10 (100%) |
+| Unsafe autonomous recoveries | 0 |
+| Average disruption recovery latency | 0.79 s |
+
+The 100% recovery result applies specifically to the tested in-transit pantry-closure scenarios and should not be interpreted as a 100% recovery rate for every possible disruption type.
+
+### Reproducibility
+
+The benchmark can be rerun with:
+
+```bash
+python evaluation/randomized_benchmark.py \
+  --planning 50 \
+  --disruptions 10 \
+  --seed 42
+```
+
+Detailed benchmark outputs are stored in:
+
+```text
+evaluation/results/
+├── planning_scenarios.csv
+├── disruption_scenarios.csv
+├── benchmark_summary.json
+└── benchmark_summary.md
+```
 
 ## Run Locally
 

@@ -15,6 +15,35 @@ from app.events.processor import (
 from app.events.processor import (
     process_event,
 )
+import os
+
+from app.agent.agentcore_client import (
+    invoke_rescue_coordinator,
+)
+
+def _invoke_rescue_agent(
+    prompt,
+):
+    """
+    Use AgentCore in the deployed environment.
+
+    Fall back to the local Strands agent during
+    local development and tests.
+    """
+
+    runtime_arn = os.getenv(
+        "AGENTCORE_RUNTIME_ARN",
+        "",
+    ).strip()
+
+    if runtime_arn:
+        return invoke_rescue_coordinator(
+            prompt
+        )
+
+    return agent(
+        prompt
+    )
 
 def _format_time(value):
     if isinstance(value, time):
@@ -133,7 +162,7 @@ def create_donation_and_coordinate(
     agent_response = None
 
     try:
-        response = agent(
+        response = _invoke_rescue_agent(
             f"Coordinate a rescue for donation {donation_id}. "
             f"Inspect the donation and current network state first. "
             f"Then use RescueMesh's deterministic planning tool. "

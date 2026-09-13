@@ -1,0 +1,11 @@
+[project]
+name = "rescuemesh-agentcore"
+version = "0.1.0"
+description = "RescueMesh AgentCore runtime"
+requires-python = ">=3.12,<3.13"
+
+dependencies = [
+    "strands-agents>=1.0.0",
+    "bedrock-agentcore>=1.9.1",
+    "requests"
+]

@@ -1,0 +1,25 @@
+[project]
+name = "rescuemesh"
+version = "0.1.0"
+description = "Autonomous food rescue coordination agent"
+requires-python = ">=3.12,<3.13"
+
+dependencies = [
+    "strands-agents>=1.0.0",
+    "bedrock-agentcore>=1.9.1",
+    "requests"
+]
+
+[project.optional-dependencies]
+app = [
+    "pulp",
+    "python-dotenv",
+    "ortools",
+    "streamlit>=1.39.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0"
+]
+
+dev = [
+    "pytest"
+]

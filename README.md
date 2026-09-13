@@ -285,11 +285,14 @@ evaluation/results/
 ## Run Locally
 
 ```bash
-git clone <YOUR_REPOSITORY_URL>
+git clone https://github.com/maithili74/rescuemesh
 cd rescuemesh
 
 python3 -m venv venv
 source venv/bin/activate
+
+pip install --upgrade pip
+pip install -r requirements.txt
 ```
 
 Create your environment file:

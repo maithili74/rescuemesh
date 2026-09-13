@@ -30,12 +30,12 @@ When surplus food becomes available, RescueMesh can:
 
 - inspect the donation and current rescue network;
 - determine whether a feasible rescue exists;
-- allocate food to pantries with matching need and capacity;
+- allocate food according to pantry need and capacity;
 - assign available volunteer drivers;
 - optimize delivery routes;
-- track the rescue through pickup and delivery;
+- track pickup and delivery;
 - recover automatically from safe disruptions;
-- escalate difficult tradeoffs to a human;
+- escalate genuine tradeoffs to a human;
 - require independent pantry confirmation before completion.
 
 The goal is not simply to generate advice.
@@ -48,12 +48,12 @@ The goal is to **coordinate the rescue itself**.
 
 Food rescue is not just a matching problem. It is a **real-time coordination problem**.
 
-When food becomes available, someone has to quickly answer:
+When surplus food becomes available, someone has to quickly determine:
 
 - Which pantry currently needs it?
-- How much can the pantry accept?
+- How much can each pantry accept?
 - Which volunteer driver is available?
-- Does that driver have enough capacity?
+- Does the driver have enough vehicle capacity?
 - Can pickup happen before the deadline?
 - Can the route finish within the driver's shift?
 - What happens if a driver cancels?
@@ -70,8 +70,8 @@ RescueMesh turns these interconnected decisions into a **stateful, end-to-end re
 | Feature | What RescueMesh Does |
 |---|---|
 | 🤖 **Autonomous Coordination** | A Strands agent inspects state, selects tools, and coordinates the rescue workflow |
-| 🚚 **Driver & Pantry Matching** | Matches available drivers with pantries based on need, capacity, timing, and feasibility |
-| 🗺️ **Deterministic Logistics** | Uses PuLP, OR-Tools, and OpenRouteService instead of asking an LLM to calculate routes |
+| 🚚 **Driver & Pantry Matching** | Matches available drivers and pantries using need, capacity, timing, and feasibility |
+| 🗺️ **Deterministic Logistics** | Uses PuLP, OR-Tools, and OpenRouteService instead of asking an LLM to calculate logistics |
 | 🔄 **Disruption Recovery** | Replans when drivers or pantries become unavailable |
 | 🧑‍💼 **Human-in-the-Loop** | Escalates when no clearly safe deterministic alternative exists |
 | ✅ **Verified Delivery** | Requires independent pantry confirmation after the driver reports delivery |
@@ -88,10 +88,10 @@ The application includes six views:
 
 - **Donor** — create a surplus-food donation
 - **Driver Dispatch** — view assignments, destinations, quantities, and ETAs
-- **Pantry** — confirm received food
+- **Pantry** — review inbound food and confirm receipt
 - **Operations** — inspect rescue status, events, and escalations
-- **Impact & Evaluation** — view system results
-- **Live Rescue Demo** — follow the rescue lifecycle through guided events
+- **Impact & Evaluation** — view measured system results
+- **Live Rescue Demo** — follow a rescue through its lifecycle
 
 ### Recommended Demo
 
@@ -133,7 +133,7 @@ RescueMesh may select different drivers or pantry combinations depending on the 
 
 ## How It Works
 
-A normal rescue follows this lifecycle:
+A normal RescueMesh operation follows this lifecycle:
 
 ```text
 Donation Created
@@ -157,7 +157,7 @@ Pantry Confirms Receipt
 Rescue Completed
 ```
 
-If something changes during the rescue:
+When conditions change:
 
 ```text
 Disruption
@@ -178,11 +178,11 @@ Automatic recovery      Human review
 
 > **LLMs orchestrate. Deterministic algorithms optimize.**
 
-RescueMesh deliberately separates **AI coordination** from **real-world event processing**.
+RescueMesh separates **AI coordination**, **deterministic logistics**, **persistent operational state**, and **real-world event handling**.
 
 The AI agent determines **what action should happen next**.
 
-Deterministic systems determine **whether and how the rescue can actually happen safely**.
+Deterministic systems determine **whether and how that action can be executed safely**.
 
 ```mermaid
 flowchart TB
@@ -191,21 +191,23 @@ flowchart TB
 
     subgraph APP["AWS EC2 — RescueMesh Application"]
         WEB["🔒 Nginx + HTTPS<br/>Streamlit Web App"]
-        EVENTS["📋 Rescue Event Processing"]
-        API["⚡ FastAPI Agent API"]
-        STATE[("🗄️ SQLite<br/>Operational State")]
+        API["⚡ FastAPI Backend<br/>Restricted Agent API"]
+        EVENTS["📋 Rescue Event Processing<br/>Driver • Pantry • Disruptions"]
+        STATE[("🗄️ SQLite Operational State<br/>Operations • Routes • Stops • Events")]
     end
 
     subgraph AI["Amazon Bedrock AgentCore — AI Coordination"]
+        RUNTIME["☁️ AgentCore Runtime"]
         AGENT["🤖 Strands RescueCoordinator"]
         MODEL["🧠 Amazon Bedrock<br/>Claude Haiku 4.5"]
         TOOLS["🛠️ Restricted Remote Tools"]
 
+        RUNTIME --> AGENT
         AGENT <--> MODEL
         AGENT --> TOOLS
     end
 
-    subgraph PLAN["Deterministic Logistics Engine"]
+    subgraph LOGISTICS["Deterministic Logistics Engine"]
         PLANNER["🎯 Rescue Planner"]
         PULP["📦 PuLP<br/>Food Allocation"]
         ROUTE["🗺️ OR-Tools<br/>Route Optimization"]
@@ -218,10 +220,11 @@ flowchart TB
 
     HUMAN["🧑‍💼 Human Review"]
 
+    %% USER ENTRY
     USERS -->|"HTTPS"| WEB
 
     %% AI COORDINATION PATH
-    WEB -->|"New donation<br/>IAM-authorized invocation"| AGENT
+    WEB -->|"New donation<br/>IAM-authorized invocation"| RUNTIME
     TOOLS -->|"Authenticated HTTPS"| API
     API -->|"Planning request"| PLANNER
     API <--> STATE
@@ -238,103 +241,51 @@ flowchart TB
 
 ### Architecture at a Glance
 
-**1. Application layer**
+**Application.** RescueMesh runs as a **Streamlit application on AWS EC2** behind **Nginx + HTTPS**. FastAPI exposes restricted endpoints used by the remote agent tools, while SQLite stores persistent rescue state.
 
-RescueMesh runs as a **Streamlit application on AWS EC2**, exposed through **Nginx over HTTPS**.
+**AI coordination.** A new donation can invoke **Amazon Bedrock AgentCore Runtime** using an IAM-authorized call. Inside AgentCore, the **Strands RescueCoordinator** uses **Amazon Bedrock Claude Haiku 4.5** for reasoning and selects from a restricted set of RescueMesh tools.
 
-The application provides the donor, driver, pantry, operations, evaluation, and demo interfaces.
+**Deterministic logistics.** The LLM does not calculate quantities, routes, capacities, or ETAs. **PuLP** handles food allocation, **Google OR-Tools** optimizes delivery routes, and **OpenRouteService** provides road-network travel times.
+
+**Safety boundary.** Driver acceptance, pickup, delivery, pantry confirmation, and human approval are real-world events and cannot be fabricated by the AI agent. When a disruption has no clearly safe deterministic alternative, RescueMesh escalates to a human.
 
 ---
 
-**2. AI coordination path**
+### Two Execution Paths
 
-When a donor creates a new donation, the EC2 application invokes the deployed **Amazon Bedrock AgentCore Runtime**.
+RescueMesh intentionally separates AI coordination from physical-world event processing.
 
-Inside AgentCore, the **Strands RescueCoordinator** uses Amazon Bedrock for reasoning and selects from a restricted set of RescueMesh tools.
+#### 1. AI Coordination Path
+
+Used when a donation needs autonomous coordination:
 
 ```text
-Donation
-   ↓
-Streamlit
-   ↓
-Amazon Bedrock AgentCore
-   ↓
+Donation Created
+       ↓
+Streamlit on AWS EC2
+       ↓
+Amazon Bedrock AgentCore Runtime
+       ↓
 Strands RescueCoordinator
-   ↕
+       ↕
 Amazon Bedrock
-   ↓
+       ↓
 Restricted RescueMesh Tools
+       ↓
+Authenticated FastAPI
+       ↓
+Deterministic Rescue Planner
+       ↓
+Persistent Rescue Operation
 ```
 
-The agent coordinates the workflow, but it does not calculate logistics itself.
+The agent can inspect state, select tools, request planning, monitor operations, and inspect escalations.
 
----
+The deterministic planner remains responsible for logistics feasibility.
 
-**3. Restricted agent tools**
+#### 2. Real-World Event Path
 
-The AgentCore-hosted coordinator can safely:
-
-```text
-Inspect donation
-Inspect network state
-Plan rescue
-Inspect operation
-Inspect operation events
-Inspect pending escalations
-Inspect escalation
-```
-
-These tools communicate with the **FastAPI Agent API over authenticated HTTPS**.
-
-The AI agent is intentionally not given unrestricted backend access.
-
----
-
-**4. Deterministic logistics**
-
-Critical logistics decisions are calculated outside the LLM.
-
-| Component | Responsibility |
-|---|---|
-| **PuLP** | Allocate donated food across eligible pantries |
-| **Google OR-Tools** | Build feasible volunteer-driver delivery routes |
-| **OpenRouteService** | Provide road-network travel times |
-
-The planner evaluates constraints such as:
-
-- pantry need and capacity;
-- driver availability and capacity;
-- driver shifts;
-- pickup deadlines;
-- delivery feasibility.
-
-The language model does **not** invent quantities, capacities, routes, or ETAs.
-
----
-
-**5. Persistent operational state**
-
-RescueMesh stores its operational state in **SQLite**, including:
-
-```text
-Donations
-Drivers
-Pantries
-Pantry needs
-Operations
-Driver routes
-Delivery stops
-Events
-Escalations
-```
-
-A rescue therefore exists independently of the LLM conversation.
-
----
-
-**6. Real-world event path**
-
-Driver and pantry actions deliberately bypass the AI agent.
+Used for driver and pantry actions:
 
 ```text
 Driver / Pantry
@@ -344,6 +295,12 @@ Streamlit
 Rescue Event Processing
       ↓
 Operational State
+      ↓
+Continue Rescue
+      │
+      ├── disruption → deterministic replan
+      │
+      └── no safe alternative → human review
 ```
 
 The agent cannot fabricate:
@@ -368,80 +325,7 @@ Pantry independently confirms receipt
 Stop = completed
 ```
 
-This provides two-sided delivery verification.
-
----
-
-**7. Disruption recovery**
-
-When a real-world disruption occurs, RescueMesh uses the updated state to run deterministic replanning.
-
-```text
-Disruption
-    ↓
-Updated Operational State
-    ↓
-Deterministic Replanning
-    ↓
-┌───────────────────────┬───────────────────────┐
-│ Safe alternative      │ No safe alternative   │
-▼                       ▼
-Automatic recovery      Human review
-```
-
-The agent can coordinate recovery, but logistics feasibility remains deterministic and consequential tradeoffs remain under human control.
-
----
-
-## Two Execution Paths
-
-RescueMesh intentionally uses two separate execution paths.
-
-### AI Coordination Path
-
-Used when a donation needs agentic coordination:
-
-```text
-Donation
-   ↓
-Streamlit on AWS EC2
-   ↓
-Amazon Bedrock AgentCore
-   ↓
-Strands RescueCoordinator
-   ↕
-Amazon Bedrock
-   ↓
-Restricted Remote Tools
-   ↓
-Authenticated FastAPI
-   ↓
-Deterministic Rescue Planner
-   ↓
-Persistent Rescue Operation
-```
-
-### Real-World Event Path
-
-Used for driver and pantry actions:
-
-```text
-Driver / Pantry
-      ↓
-Streamlit
-      ↓
-Rescue Event Processing
-      ↓
-Operational State
-      ↓
-Continue Rescue
-      │
-      ├── disruption → deterministic replan
-      │
-      └── no safe alternative → human review
-```
-
-This separation lets RescueMesh use AI for flexible coordination while keeping physical-world state transitions deterministic and verifiable.
+This separation allows RescueMesh to use AI for flexible coordination while keeping logistics calculations and physical-world state transitions deterministic and verifiable.
 
 ---
 
@@ -457,7 +341,7 @@ RescueMesh was evaluated using automated tests and reproducible randomized logis
 pytest tests/ -q
 ```
 
-The test suite covers planning constraints, capacity, driver availability, deadlines, routing, disruption recovery, and workflow state.
+The test suite covers planning constraints, capacity handling, driver availability, shifts, deadlines, routing, disruption recovery, and workflow state.
 
 ### Randomized Planning Benchmark
 
@@ -471,16 +355,17 @@ Using `seed=42`, RescueMesh was evaluated on **50 randomized planning scenarios*
 | Safely rejected infeasible scenarios | **4 / 50 (8%)** |
 | Safety compliance among generated plans | **46 / 46 (100%)** |
 | Weighted food rescued | **89.62%** |
+| Capacity violations | **0** |
 | Average planning latency | **6.42 s** |
 | P95 planning latency | **6.63 s** |
 
-All generated plans passed the benchmark's independent safety checks.
+Every generated rescue plan passed the benchmark's independent safety checks.
 
 When no feasible rescue existed, RescueMesh safely rejected the scenario rather than producing an invalid plan.
 
 ### Disruption Recovery
 
-The benchmark also simulated **10 in-transit pantry closures**.
+The benchmark also simulated **10 in-transit pantry-closure disruptions**.
 
 | Metric | Result |
 |---|---:|
@@ -489,7 +374,7 @@ The benchmark also simulated **10 in-transit pantry closures**.
 | Unsafe autonomous recoveries | **0** |
 | Average recovery latency | **0.79 s** |
 
-The recovery result applies specifically to the tested pantry-closure scenarios and should not be interpreted as a 100% recovery rate for every possible disruption type.
+> The 100% recovery result applies specifically to the tested in-transit pantry-closure scenarios and should not be interpreted as a 100% recovery rate for every possible disruption type.
 
 ### Reproduce the Benchmark
 
@@ -500,7 +385,7 @@ python evaluation/randomized_benchmark.py \
   --seed 42
 ```
 
-Detailed benchmark outputs are available in:
+Detailed outputs are stored in:
 
 ```text
 evaluation/results/
@@ -533,18 +418,43 @@ evaluation/results/
 
 ---
 
+## Prerequisites
+
+For local development:
+
+- **Python 3.10+**
+- an **OpenRouteService API key**
+- AWS credentials with **Amazon Bedrock access** when using the local Strands coordinator
+- an **AgentCore Runtime ARN** and permission to invoke it when testing the deployed AgentCore path
+
+---
+
 ## Run Locally
+
+Clone the repository:
 
 ```bash
 git clone https://github.com/maithili74/rescuemesh.git
 cd rescuemesh
+```
 
+Create a virtual environment:
+
+```bash
 python3 -m venv venv
 source venv/bin/activate
+```
 
+Install dependencies:
+
+```bash
 pip install --upgrade pip
 pip install -r requirements.txt
+```
 
+Create the environment file:
+
+```bash
 cp .env.example .env
 ```
 
@@ -600,9 +510,9 @@ Without `AGENTCORE_RUNTIME_ARN`, RescueMesh can use the local Strands coordinato
 rescuemesh/
 ├── app/
 │   ├── agent/          # Strands + AgentCore integration
-│   ├── api/            # FastAPI agent API
+│   ├── api/            # FastAPI backend
 │   ├── dashboard/      # Streamlit application
-│   ├── services/       # Planning and routing
+│   ├── services/       # Planning and routing services
 │   └── tools/          # Agent tools
 │
 ├── deploy/
@@ -614,6 +524,7 @@ rescuemesh/
 │
 ├── scripts/
 ├── tests/
+│
 ├── .env.example
 ├── LICENSE
 ├── pyproject.toml
@@ -630,11 +541,11 @@ RescueMesh is a hackathon prototype.
 The current implementation uses:
 
 - simulated donors, pantries, and volunteer drivers;
-- SQLite instead of a distributed production database;
+- SQLite rather than a distributed production database;
 - web-based driver and pantry interfaces rather than production mobile applications;
-- OpenRouteService for routing data.
+- OpenRouteService for external routing data.
 
-A production deployment would add stronger identity management, observability, fault tolerance, monitoring, and multi-user infrastructure.
+A production deployment would add stronger identity management, authentication, observability, monitoring, fault tolerance, and multi-user infrastructure.
 
 ---
 

@@ -153,7 +153,7 @@ navigation_options = [
 if demo_mode:
 
     navigation_options.append(
-        "🧪 Demo Simulator"
+        "Live Rescue Demo"
     )
 
 
@@ -197,7 +197,7 @@ elif selected_view == "Impact & Evaluation":
     render_evaluation_view()
 
 
-elif selected_view == "🧪 Demo Simulator":
+elif selected_view == "Live Rescue Demo":
 
     render_demo_view()
 
